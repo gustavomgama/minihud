@@ -11,6 +11,7 @@ use timing::PresentTimer;
 use ui::{draw_graph, draw_text, TextBrush};
 use win::overlay::Overlay;
 use windows::core::Result;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_F7, VK_F8};
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, WM_HOTKEY, WM_QUIT,
 };
@@ -32,6 +33,10 @@ fn main() -> Result<()> {
     let mut click_through = cfg.click_through;
     let mut msg = MSG::default();
     let mut frames: u64 = 0;
+    // Poll fallback: RegisterHotKey can silently fail (e.g. second instance
+    // holds F7/F8). Edge-triggered GetAsyncKeyState keeps F7/F8 working.
+    let mut f7_down = false;
+    let mut f8_down = false;
     // Create brushes once outside the loop (cheaper, less flicker).
     let white_brush = overlay
         .rt()
@@ -51,12 +56,13 @@ fn main() -> Result<()> {
                     let id = msg.wParam.0 as i32;
                     if id == hotkey::HOTKEY_ID_TOGGLE {
                         visible = !visible;
-                        tracing::info!("visible={visible} (F7)");
+                        overlay.set_visible(visible);
+                        tracing::info!("visible={visible} (F7 hotkey)");
                     }
                     if id == hotkey::HOTKEY_ID_CLICKTHROUGH {
                         click_through = !click_through;
                         overlay.set_click_through(click_through);
-                        tracing::info!("click_through={click_through} (F8)");
+                        tracing::info!("click_through={click_through} (F8 hotkey)");
                     }
                 }
                 _ => unsafe {
@@ -68,6 +74,21 @@ fn main() -> Result<()> {
         let _ = timer.tick();
         let _ = hw.update();
         frames += 1;
+        // Poll fallback for hotkeys (edge-triggered).
+        let f7_now = unsafe { GetAsyncKeyState(VK_F7.0 as i32) } < 0;
+        if f7_now && !f7_down {
+            visible = !visible;
+            overlay.set_visible(visible);
+            tracing::info!("visible={visible} (F7 poll)");
+        }
+        f7_down = f7_now;
+        let f8_now = unsafe { GetAsyncKeyState(VK_F8.0 as i32) } < 0;
+        if f8_now && !f8_down {
+            click_through = !click_through;
+            overlay.set_click_through(click_through);
+            tracing::info!("click_through={click_through} (F8 poll)");
+        }
+        f8_down = f8_now;
         if frames % 300 == 1 {
             let s = timer.stats();
             tracing::info!("frame {frames}: fps={:.0} avg_ms={:.2}", s.fps, s.avg_ms);

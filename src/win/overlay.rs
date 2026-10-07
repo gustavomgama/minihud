@@ -15,8 +15,9 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, LoadCursorW, PostQuitMessage,
     RegisterClassW, SetWindowLongPtrW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW,
-    GWL_EXSTYLE, HWND_TOPMOST, IDC_ARROW, SWP_NOMOVE, SWP_NOSIZE, SW_SHOW, WM_DESTROY, WNDCLASSW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP, WS_VISIBLE,
+    GWL_EXSTYLE, HWND_TOPMOST, IDC_ARROW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SW_HIDE, SW_SHOW, WM_DESTROY, WNDCLASSW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    WS_POPUP, WS_VISIBLE,
 };
 
 pub struct Overlay {
@@ -148,13 +149,38 @@ impl Overlay {
                 ex & !transparent
             };
             let _ = SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, new_ex as isize);
+            // Style changes need FRAMECHANGED to apply immediately.
+            let _ = SetWindowPos(
+                self.hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+        }
+    }
+
+    pub fn set_visible(&self, visible: bool) {
+        unsafe {
+            let _ = ShowWindow(self.hwnd, if visible { SW_SHOW } else { SW_HIDE });
+            if visible {
+                let _ = SetWindowPos(
+                    self.hwnd,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
         }
     }
 
     pub fn show(&self) {
-        unsafe {
-            let _ = ShowWindow(self.hwnd, SW_SHOW);
-        }
+        self.set_visible(true);
     }
 
     pub fn begin_draw(&self) {
