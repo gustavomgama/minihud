@@ -1,5 +1,5 @@
 use windows::core::{Result, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U;
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Factory1, ID2D1HwndRenderTarget, D2D1_FACTORY_TYPE_SINGLE_THREADED,
@@ -13,10 +13,10 @@ use windows::Win32::Graphics::DirectWrite::{
 use windows::Win32::Graphics::Gdi::HBRUSH;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, LoadCursorW, PostQuitMessage, RegisterClassW,
-    SetLayeredWindowAttributes, SetWindowLongPtrW, ShowWindow, CS_HREDRAW, CS_VREDRAW, GWL_EXSTYLE,
-    IDC_ARROW, LWA_ALPHA, SW_SHOW, WM_DESTROY, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, LoadCursorW, PostQuitMessage,
+    RegisterClassW, SetWindowLongPtrW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW,
+    GWL_EXSTYLE, HWND_TOPMOST, IDC_ARROW, SWP_NOMOVE, SWP_NOSIZE, SW_SHOW, WM_DESTROY, WNDCLASSW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP, WS_VISIBLE,
 };
 
 pub struct Overlay {
@@ -64,7 +64,7 @@ impl Overlay {
         unsafe { RegisterClassW(&wc) };
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT,
+                WS_EX_TOPMOST | WS_EX_TRANSPARENT,
                 PCWSTR(class_name.as_ptr()),
                 PCWSTR(wstr(title).as_ptr()),
                 WS_POPUP | WS_VISIBLE,
@@ -89,7 +89,18 @@ impl Overlay {
             text_fmt: None,
         };
         ov.create_resources(w, h)?;
-        unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), 240, LWA_ALPHA) };
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE,
+            );
+        }
         Ok(ov)
     }
 
@@ -129,19 +140,20 @@ impl Overlay {
 
     pub fn set_click_through(&self, enable: bool) {
         unsafe {
-            let base = WS_EX_TOPMOST | WS_EX_LAYERED;
-            let ex = if enable {
-                base | WS_EX_TRANSPARENT
+            let ex = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) as u32;
+            let transparent = WS_EX_TRANSPARENT.0 as u32;
+            let new_ex = if enable {
+                ex | transparent
             } else {
-                base
+                ex & !transparent
             };
-            let _ = SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex.0 as isize);
+            let _ = SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, new_ex as isize);
         }
     }
 
     pub fn show(&self) {
         unsafe {
-            ShowWindow(self.hwnd, SW_SHOW);
+            let _ = ShowWindow(self.hwnd, SW_SHOW);
         }
     }
 
@@ -149,6 +161,14 @@ impl Overlay {
         if let Some(rt) = &self.rt {
             unsafe {
                 rt.BeginDraw();
+                rt.Clear(Some(
+                    &windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F {
+                        r: 0.02,
+                        g: 0.02,
+                        b: 0.02,
+                        a: 1.0,
+                    },
+                ));
             }
         }
     }
