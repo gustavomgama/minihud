@@ -1,9 +1,9 @@
 use windows::core::{Result, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U;
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Factory1, ID2D1HwndRenderTarget, D2D1_FACTORY_TYPE_SINGLE_THREADED,
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES,
-    D2D1_SIZE_U,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
@@ -57,7 +57,7 @@ impl Overlay {
             hInstance: HINSTANCE(hinstance.0),
             lpszClassName: PCWSTR(class_name.as_ptr()),
             hCursor: unsafe { LoadCursorW(None, IDC_ARROW)? },
-            hbrBackground: HBRUSH(0),
+            hbrBackground: HBRUSH(std::ptr::null_mut()),
             style: CS_HREDRAW | CS_VREDRAW,
             ..Default::default()
         };
@@ -97,7 +97,7 @@ impl Overlay {
         let rt_props = D2D1_RENDER_TARGET_PROPERTIES::default();
         let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
             hwnd: self.hwnd,
-            pixelSize: D2D1_SIZE_U {
+            pixelSize: D2D_SIZE_U {
                 width: w as u32,
                 height: h as u32,
             },

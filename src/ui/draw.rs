@@ -1,9 +1,10 @@
 use windows::core::Result;
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D1_POINT_2F, D2D1_RECT_F};
+use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::{
     ID2D1HwndRenderTarget, ID2D1SolidColorBrush, D2D1_BRUSH_PROPERTIES, D2D1_DRAW_TEXT_OPTIONS_NONE,
 };
-use windows::Win32::Graphics::DirectWrite::{IDWriteTextFormat, DWRITE_TEXT_ALIGNMENT_LEADING};
+use windows::Win32::Graphics::DirectWrite::{IDWriteTextFormat, DWRITE_MEASURING_MODE_NATURAL};
+use windows_numerics::Vector2;
 
 pub struct TextBrush {
     pub brush: ID2D1SolidColorBrush,
@@ -30,20 +31,20 @@ pub fn draw_text(
     text: &str,
 ) -> Result<()> {
     let utf16: Vec<u16> = text.encode_utf16().collect();
-    let rect = D2D1_RECT_F {
+    let rect = D2D_RECT_F {
         left: x,
         top: y,
         right: x + 800.0,
         bottom: y + 40.0,
     };
     unsafe {
-        rt.DrawTextW(
+        rt.DrawText(
             &utf16,
             fmt,
             &rect,
             brush,
             D2D1_DRAW_TEXT_OPTIONS_NONE,
-            DWRITE_TEXT_ALIGNMENT_LEADING,
+            DWRITE_MEASURING_MODE_NATURAL,
         );
     }
     Ok(())
@@ -79,8 +80,8 @@ pub fn draw_graph(
         let ny = y + h - (v / maxv) * h;
         unsafe {
             rt.DrawLine(
-                D2D1_POINT_2F { x: px, y: py },
-                D2D1_POINT_2F { x: nx, y: ny },
+                Vector2 { X: px, Y: py },
+                Vector2 { X: nx, Y: ny },
                 brush,
                 1.0,
                 None,
