@@ -20,7 +20,8 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
     let cfg = Config::load();
     tracing::info!("config at {:?}: {:?}", Config::path(), cfg);
-    let overlay = Overlay::new("minihud", cfg.x, cfg.y, 420, 120)?;
+    let win_h = if cfg.show_frametime_graph { 120 } else { 64 };
+    let overlay = Overlay::new("minihud", cfg.x, cfg.y, 460, win_h, cfg.text_size)?;
     tracing::info!("overlay hwnd: {:?}", overlay.hwnd);
     overlay.set_click_through(cfg.click_through);
     match hotkey::register(overlay.hwnd) {
@@ -38,9 +39,11 @@ fn main() -> Result<()> {
     let mut f7_down = false;
     let mut f8_down = false;
     // Create brushes once outside the loop (cheaper, less flicker).
+    // Text alpha follows cfg.opacity (window itself is opaque for now).
+    let text_alpha = cfg.opacity.clamp(0.2, 1.0);
     let white_brush = overlay
         .rt()
-        .and_then(|rt| TextBrush::new(rt, 1.0, 1.0, 1.0, 1.0).ok());
+        .and_then(|rt| TextBrush::new(rt, 1.0, 1.0, 1.0, text_alpha).ok());
     if white_brush.is_none() {
         tracing::warn!("no render target; overlay will be empty");
     }
@@ -72,7 +75,10 @@ fn main() -> Result<()> {
             }
         }
         let _ = timer.tick();
-        let _ = hw.update();
+        if let Some(s) = hw.update() {
+            let _ = s;
+        }
+        let stats = hw.cached().clone();
         frames += 1;
         // Poll fallback for hotkeys (edge-triggered).
         let f7_now = unsafe { GetAsyncKeyState(VK_F7.0 as i32) } < 0;
@@ -91,7 +97,17 @@ fn main() -> Result<()> {
         f8_down = f8_now;
         if frames % 300 == 1 {
             let s = timer.stats();
-            tracing::info!("frame {frames}: fps={:.0} avg_ms={:.2}", s.fps, s.avg_ms);
+            tracing::info!(
+                "frame {frames}: fps={:.0} avg_ms={:.2} cpu={:.0}% ram={}/{}MB vram={}/{}MB gpu={:?}",
+                s.fps,
+                s.avg_ms,
+                stats.cpu_percent,
+                stats.ram_used_mb,
+                stats.ram_total_mb,
+                stats.gpu_vram_used_mb,
+                stats.gpu_vram_total_mb,
+                stats.gpu_percent,
+            );
         }
         if visible {
             overlay.begin_draw();
@@ -114,19 +130,27 @@ fn main() -> Result<()> {
                     }
                 };
                 let s = timer.stats();
-                let line = format!(
+                let line1 = format!(
                     "FPS: {:3.0} | ms: {:5.2} | min: {:5.2} | max: {:5.2}",
                     s.fps, s.avg_ms, s.min_ms, s.max_ms
                 );
-                let r1 = draw_text(rt, fmt, brush, 8.0, 6.0, &line);
-                if frames % 300 == 1 {
-                    tracing::info!("draw_text result: {r1:?}");
-                }
+                let gpu_txt = match stats.gpu_percent {
+                    Some(g) => format!("{g:3.0}%"),
+                    None => "--".to_string(),
+                };
+                let line2 = format!(
+                    "CPU: {:3.0}% | RAM: {}/{}MB | GPU: {} | VRAM: {}/{}MB",
+                    stats.cpu_percent,
+                    stats.ram_used_mb,
+                    stats.ram_total_mb,
+                    gpu_txt,
+                    stats.gpu_vram_used_mb,
+                    stats.gpu_vram_total_mb,
+                );
+                let _ = draw_text(rt, fmt, brush, 8.0, 4.0, &line1);
+                let _ = draw_text(rt, fmt, brush, 8.0, 22.0, &line2);
                 if cfg.show_frametime_graph {
-                    let r2 = draw_graph(rt, brush, timer.samples_ms(), 8.0, 28.0, 380.0, 60.0);
-                    if frames % 300 == 1 {
-                        tracing::info!("draw_graph result: {r2:?}");
-                    }
+                    let _ = draw_graph(rt, brush, timer.samples_ms(), 8.0, 44.0, 420.0, 60.0);
                 }
             }
             let _ = overlay.end_draw();

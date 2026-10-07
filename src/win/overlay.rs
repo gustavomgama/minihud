@@ -50,7 +50,7 @@ unsafe extern "system" fn wnd_proc(
 }
 
 impl Overlay {
-    pub fn new(title: &str, x: i32, y: i32, w: i32, h: i32) -> Result<Self> {
+    pub fn new(title: &str, x: i32, y: i32, w: i32, h: i32, font_size: f32) -> Result<Self> {
         let hinstance = unsafe { GetModuleHandleW(None)? };
         let class_name = wstr("minihud_class");
         let wc = WNDCLASSW {
@@ -89,7 +89,7 @@ impl Overlay {
             rt: None,
             text_fmt: None,
         };
-        ov.create_resources(w, h)?;
+        ov.create_resources(w, h, font_size)?;
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = SetWindowPos(
@@ -105,7 +105,7 @@ impl Overlay {
         Ok(ov)
     }
 
-    fn create_resources(&mut self, w: i32, h: i32) -> Result<()> {
+    fn create_resources(&mut self, w: i32, h: i32, font_size: f32) -> Result<()> {
         let rt_props = D2D1_RENDER_TARGET_PROPERTIES::default();
         let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
             hwnd: self.hwnd,
@@ -126,7 +126,7 @@ impl Overlay {
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                14.0,
+                font_size.clamp(10.0, 28.0),
                 PCWSTR(wstr("en-us").as_ptr()),
             )?
         };
