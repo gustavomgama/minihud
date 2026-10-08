@@ -26,7 +26,7 @@ fn main() -> Result<()> {
     if let Some(f) = &args.process {
         tracing::info!("process filter: {}", f.label());
     }
-    let win_h = if cfg.show_frametime_graph { 150 } else { 96 };
+    let win_h = if cfg.show_frametime_graph { 126 } else { 72 };
     let overlay = Overlay::new("minihud", cfg.x, cfg.y, 500, win_h, cfg.text_size)?;
     tracing::info!("overlay hwnd: {:?}", overlay.hwnd);
     overlay.set_click_through(cfg.click_through);
@@ -134,39 +134,37 @@ fn main() -> Result<()> {
                         }
                     }
                 };
-                let s = timer.stats();
-                // Section tags + units on every value: HUD = this overlay's
-                // refresh, SYS = machine, GPU = graphics adapter.
-                let line1 = format!(
-                    "HUD  FPS {:3.0} | FRAME {:5.2} ms avg (min {:5.2} / max {:5.2})",
-                    s.fps, s.avg_ms, s.min_ms, s.max_ms
-                );
+                // Sections: APP = tracked game, SYS = machine, GPU = adapter.
+                // No HUD-own stats on screen by design; the graph shows the
+                // GAME's frame intervals, never the overlay's refresh.
                 let gpu_txt = match stats.gpu_percent {
                     Some(g) => format!("{g:3.0}%"),
                     None => "--".to_string(),
                 };
-                let line2 = match apps.top(self_pid, args.process.as_ref()) {
+                let app = apps.top(self_pid, args.process.as_ref());
+                let line1 = match &app {
                     Some(a) => format!(
                         "APP  {} {:3.0} FPS | {:5.2} ms avg",
                         a.name, a.fps, a.avg_ms
                     ),
                     None => apps.status_text(args.process.as_ref()),
                 };
-                let line3 = format!(
+                let line2 = format!(
                     "SYS  CPU {:3.0}% | RAM {}",
                     stats.cpu_percent,
                     mem_txt(stats.ram_used_mb, stats.ram_total_mb),
                 );
-                let line4 = format!(
+                let line3 = format!(
                     "GPU  {gpu_txt} | VRAM {}",
                     mem_txt(stats.gpu_vram_used_mb, stats.gpu_vram_total_mb),
                 );
                 let _ = draw_text(rt, fmt, brush, 8.0, 4.0, &line1);
                 let _ = draw_text(rt, fmt, brush, 8.0, 22.0, &line2);
                 let _ = draw_text(rt, fmt, brush, 8.0, 40.0, &line3);
-                let _ = draw_text(rt, fmt, brush, 8.0, 58.0, &line4);
                 if cfg.show_frametime_graph {
-                    let _ = draw_graph(rt, brush, timer.samples_ms(), 8.0, 80.0, 460.0, 52.0);
+                    if let Some(a) = &app {
+                        let _ = draw_graph(rt, brush, &a.recent_ms, 8.0, 62.0, 460.0, 52.0);
+                    }
                 }
             }
             let _ = overlay.end_draw();

@@ -18,6 +18,9 @@ pub struct AppFrame {
     pub name: String,
     pub fps: f32,
     pub avg_ms: f32,
+    /// Newest ≤120 frame intervals in ms, chronological. Feeds the HUD
+    /// frametime graph so it shows the GAME, never the overlay itself.
+    pub recent_ms: Vec<f32>,
 }
 
 #[derive(Default)]
@@ -230,19 +233,26 @@ impl AppTracker {
             .map(|q| q.iter().filter(|t| **t >= win_from).count())
             .unwrap_or(0);
         let q = st.events.get(&pid)?;
-        // avg_ms from consecutive QPC intervals inside the 1s window.
+        // avg_ms from consecutive QPC intervals inside the 1s window,
+        // plus the newest intervals for the HUD frametime graph.
         let mut sum = 0.0f64;
         let mut gaps = 0u32;
         let mut prev: Option<i64> = None;
+        let mut recent_ms: Vec<f32> = Vec::new();
         for t in q.iter().filter(|t| **t >= win_from) {
             if let Some(p) = prev {
                 let dt = *t - p;
                 if dt > 0 {
-                    sum += dt as f64 * 1000.0 / freq;
+                    let ms = dt as f64 * 1000.0 / freq;
+                    sum += ms;
                     gaps += 1;
+                    recent_ms.push(ms as f32);
                 }
             }
             prev = Some(*t);
+        }
+        if recent_ms.len() > 120 {
+            recent_ms.drain(..recent_ms.len() - 120);
         }
         let avg_ms = if gaps > 0 { sum / gaps as f64 } else { 0.0 } as f32;
         let name = st
@@ -255,6 +265,7 @@ impl AppTracker {
             name,
             fps: n as f32,
             avg_ms,
+            recent_ms,
         })
     }
 

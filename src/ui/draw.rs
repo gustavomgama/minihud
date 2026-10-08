@@ -59,7 +59,7 @@ pub fn draw_graph(
     w: f32,
     h: f32,
 ) -> Result<()> {
-    if samples.is_empty() {
+    if samples.len() < 2 {
         return Ok(());
     }
     let n = samples.len() as f32;
