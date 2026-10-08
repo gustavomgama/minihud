@@ -366,16 +366,27 @@ fn process_info(pid: u32) -> Option<ProcInfo> {
     };
     unsafe {
         // Try full access first (name + modules in one handle).
-        if let Ok(h) = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid) {
-            let name = image_name(h).unwrap_or_else(|| format!("pid {pid}"));
-            let api = detect_api(h);
-            let _ = CloseHandle(h);
-            return Some(ProcInfo { name, api });
+        match OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid) {
+            Ok(h) => {
+                let name = image_name(h).unwrap_or_else(|| format!("pid {pid}"));
+                let api = detect_api(h);
+                if api.is_none() {
+                    // Handle worked, modules didn't (or no known runtime
+                    // loaded yet): one line, then "--" stands honestly.
+                    tracing::info!("appstats: no known graphics runtime in pid {pid} ({name})");
+                }
+                let _ = CloseHandle(h);
+                return Some(ProcInfo { name, api });
+            }
+            Err(e) => {
+                // Typically OS error 5: higher-integrity or protected
+                // target. The name still resolves via the limited
+                // fallback; the API is unknowable from outside.
+                tracing::info!("appstats: pid {pid} denies full access ({e:?}); api unknown");
+            }
         }
-        // Protected process (anti-cheat blocks full access): name only.
-        // API stays unknown ("--") rather than guessed.
+        // Protected process: name only. API stays unknown, not guessed.
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-        tracing::debug!("appstats: full handle denied for pid {pid}; api unknown");
         let name = image_name(h).unwrap_or_else(|| format!("pid {pid}"));
         let _ = CloseHandle(h);
         Some(ProcInfo { name, api: None })
@@ -396,7 +407,10 @@ fn detect_api(hprocess: windows::Win32::Foundation::HANDLE) -> Option<String> {
         ("opengl32.dll", "OpenGL"),
     ];
     unsafe {
-        let mut mods = [HMODULE::default(); 128];
+        // Room for thousands: UE games load hundreds of DLLs and a
+        // 128-slot cap silently truncated the runtime list (this exact
+        // bug hid d3d12.dll once already).
+        let mut mods = vec![HMODULE::default(); 2048];
         let mut needed = 0u32;
         if EnumProcessModules(
             hprocess,
@@ -412,8 +426,9 @@ fn detect_api(hprocess: windows::Win32::Foundation::HANDLE) -> Option<String> {
         let mut loaded: Vec<String> = Vec::with_capacity(count);
         for m in mods.iter().take(count) {
             let mut buf = [0u16; 64];
-            if GetModuleBaseNameW(hprocess, Some(*m), &mut buf) > 0 {
-                loaded.push(String::from_utf16_lossy(&buf).to_lowercase());
+            let n = GetModuleBaseNameW(hprocess, Some(*m), &mut buf);
+            if n > 0 {
+                loaded.push(String::from_utf16_lossy(&buf[..n as usize]).to_lowercase());
             }
         }
         for (dll, label) in RUNTIMES {
