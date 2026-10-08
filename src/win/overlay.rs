@@ -16,8 +16,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, LoadCursorW, PostQuitMessage,
     RegisterClassW, SetWindowLongPtrW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW,
     GWL_EXSTYLE, HWND_TOPMOST, IDC_ARROW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SW_HIDE, SW_SHOW, WM_DESTROY, WNDCLASSW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-    WS_POPUP, WS_VISIBLE,
+    SWP_NOZORDER, SW_HIDE, SW_SHOW, WM_DESTROY, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP, WS_VISIBLE,
 };
 
 pub struct Overlay {
@@ -66,7 +66,9 @@ impl Overlay {
         unsafe { RegisterClassW(&wc) };
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_TOPMOST | WS_EX_TRANSPARENT,
+                // TOOLWINDOW: hides the overlay from Alt+Tab and the
+                // taskbar. No visual effect on a borderless WS_POPUP.
+                WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW,
                 PCWSTR(class_name.as_ptr()),
                 PCWSTR(wstr(title).as_ptr()),
                 WS_POPUP | WS_VISIBLE,
