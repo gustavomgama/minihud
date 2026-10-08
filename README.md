@@ -13,7 +13,9 @@ Rust + `windows-rs` + Direct2D. No UI framework.
 - Two-tier text (dim labels, bright values); digits step exactly when
   source data steps (no animated transitions between polls)
 - min / avg / max / 1% low frametime, game Hz + display Hz
-- CPU: load %, avg clock MHz (via CallNtPowerInformation), RAM used/total
+- CPU: load %, avg clock MHz (via CallNtPowerInformation), temp °C,
+  power W (via LibreHardwareMonitor; `--` where the board yields
+  nothing), RAM used/total
 - GPU: load %, temp °C, power W, core/mem clocks (via NVML on NVIDIA;
   core voltage in mV has no NVML API and is omitted, not faked),
   VRAM used/total
@@ -38,6 +40,26 @@ skipped-frame counts. Exceptions, all deliberate: the 8/30ms main-loop
 heartbeat (hotkey latency, costs nothing when skipping), the 1s ETW
 flush floor (platform minimum), ETW retry backoff and the 2s device-
 recovery timer (recovery paths, not data rates).
+
+## Hardware backend: LibreHardwareMonitor (primary)
+
+LHM is .NET-only, so a persistent PowerShell sidecar
+(`tools/lhm/lhm-bridge.ps1`) hosts `LibreHardwareMonitorLib.dll` and
+emits one JSON sensor dump per poll. Rust reads it on a dedicated
+thread — the main loop never blocks on it. PDH/NVML/DXGI remain as
+automatic fallbacks wherever LHM has no data.
+
+One-time DLL fetch (gitignored, ~700KB, pinned 0.9.4):
+
+```powershell
+curl -L "https://www.nuget.org/api/v2/package/LibreHardwareMonitorLib/0.9.4" -o lhm.zip
+Expand-Archive lhm.zip lhm-pkg
+Copy-Item lhm-pkg\lib\net472\LibreHardwareMonitorLib.dll tools\lhm\
+```
+
+For runs outside cargo, copy `tools\lhm\lhm-bridge.ps1` and the DLL
+next to `minihud.exe`. Without them the HUD degrades to the legacy
+backends (CPU temp/power read `--`).
 
 ## Notes
 

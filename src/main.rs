@@ -32,7 +32,7 @@ fn main() -> Result<()> {
     if let Some(f) = &args.process {
         tracing::info!("process filter: {}", f.label());
     }
-    let win_h = 450; // fixed: stable rows, no resize flicker
+    let win_h = 486; // fixed: stable rows, no resize flicker
     let mut overlay = Overlay::new("minihud", cfg.x, cfg.y, 500, win_h, cfg.text_size)?;
     tracing::info!("overlay hwnd: {:?}", overlay.hwnd);
     overlay.set_click_through(cfg.click_through);
@@ -167,7 +167,7 @@ fn main() -> Result<()> {
                 },
             );
             tracing::info!(
-                "frame {frames}: fps={:.0} avg_ms={:.2} cpu={:.0}% ram={}/{}MB vram={}/{}MB gpu={:?} app=[{app_txt}] etw_dropped={} etw_start={etw_start} etw_stop={etw_stop} pids=[{snap}] lagmax={}ms nv=[{nv_txt}] cpumhz={} hwms={} skip={}",
+                "frame {frames}: fps={:.0} avg_ms={:.2} cpu={:.0}% ram={}/{}MB vram={}/{}MB gpu={:?} app=[{app_txt}] etw_dropped={} etw_start={etw_start} etw_stop={etw_stop} pids=[{snap}] lagmax={}ms nv=[{nv_txt}] cpumhz={} hwms={} skip={} cputp={}",
                 s.fps,
                 s.avg_ms,
                 stats.cpu_percent,
@@ -181,6 +181,11 @@ fn main() -> Result<()> {
                 stats.cpu_mhz.map(|m| m.to_string()).as_deref().unwrap_or("--"),
                 hw.interval_ms(),
                 std::mem::replace(&mut skipped, 0),
+                format!(
+                    "{}/{}",
+                    stats.cpu_temp_c.map(|t| format!("{t:.0}C")).as_deref().unwrap_or("--"),
+                    stats.cpu_power_w.map(|p| format!("{p:.0}W")).as_deref().unwrap_or("--"),
+                ),
             );
         }
         if visible {
@@ -257,6 +262,8 @@ fn main() -> Result<()> {
                 low_t.clone(),
                 cpu_txt,
                 opt_u32(stats.cpu_mhz, "MHz"),
+                opt_f32(stats.cpu_temp_c, "°C", 0),
+                opt_f32(stats.cpu_power_w, "W", 0),
                 mem_txt(stats.ram_used_mb, stats.ram_total_mb),
                 gpu_txt.clone(),
                 opt_f32(stats.gpu_temp_c, "°C", 0),
@@ -316,16 +323,18 @@ fn main() -> Result<()> {
                     let _ = draw_text(rt, fmt, bl, 8.0, 202.0, "CPU:");
                     row(220.0, "load", &vals[7]);
                     row(238.0, "clock", &vals[8]);
-                    row(256.0, "RAM", &vals[9]);
-                    let _ = draw_text(rt, fmt, bl, 8.0, 278.0, "GPU:");
-                    row(296.0, "load", &vals[10]);
-                    row(314.0, "temp", &vals[11]);
-                    row(332.0, "power", &vals[12]);
-                    row(350.0, "core", &vals[13]);
-                    row(368.0, "mem", &vals[14]);
-                    row(386.0, "VRAM", &vals[15]);
-                    row(404.0, "GAME", &vals[16]);
-                    row(422.0, "DISP", &vals[17]);
+                    row(256.0, "temp", &vals[9]);
+                    row(274.0, "power", &vals[10]);
+                    row(292.0, "RAM", &vals[11]);
+                    let _ = draw_text(rt, fmt, bl, 8.0, 314.0, "GPU:");
+                    row(332.0, "load", &vals[12]);
+                    row(350.0, "temp", &vals[13]);
+                    row(368.0, "power", &vals[14]);
+                    row(386.0, "core", &vals[15]);
+                    row(404.0, "mem", &vals[16]);
+                    row(422.0, "VRAM", &vals[17]);
+                    row(440.0, "GAME", &vals[18]);
+                    row(458.0, "DISP", &vals[19]);
                     // EndDraw fails when the D2D device is lost (driver
                     // update, TDR, GPU switch): drop the dead resources
                     // and rebuild on a 2s timer until the device is back.

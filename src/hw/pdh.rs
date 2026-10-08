@@ -13,6 +13,8 @@ use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTAT
 pub struct HwStats {
     pub cpu_percent: f32,
     pub cpu_mhz: Option<u32>,
+    pub cpu_temp_c: Option<f32>,
+    pub cpu_power_w: Option<f32>,
     pub ram_used_mb: u64,
     pub ram_total_mb: u64,
     pub gpu_percent: Option<f32>,
@@ -73,6 +75,7 @@ pub struct HwPoller {
     stable_polls: u8,
     cpu: Option<PdhCounter>,
     gpu: Option<PdhCounter>,
+    lhm: super::lhm::LhmFeed,
     cached: HwStats,
     prev: Option<HwStats>,
     warmup: u8,
@@ -92,6 +95,7 @@ impl HwPoller {
             idle: Duration::from_millis(idle_ms.max(active_ms.max(1))),
             cpu,
             gpu,
+            lhm: super::lhm::LhmFeed::start(),
             cached: HwStats::default(),
             prev: None,
             warmup: 0,
@@ -110,6 +114,8 @@ impl HwPoller {
             || opt_changed(c.gpu_percent, p.gpu_percent, 2.0)
             || opt_changed(c.gpu_temp_c, p.gpu_temp_c, 0.5)
             || opt_changed(c.gpu_power_w, p.gpu_power_w, 1.0)
+            || opt_changed(c.cpu_temp_c, p.cpu_temp_c, 0.5)
+            || opt_changed(c.cpu_power_w, p.cpu_power_w, 1.0)
             || c.gpu_core_mhz != p.gpu_core_mhz
             || c.gpu_mem_mhz != p.gpu_mem_mhz
             || mhz_changed(c.cpu_mhz, p.cpu_mhz)
@@ -143,25 +149,42 @@ impl HwPoller {
         self.cached.ram_used_mb = used;
         self.cached.ram_total_mb = total;
         self.cached.cpu_mhz = cpu_mhz();
+        // LibreHardwareMonitor first (uniform CPU/GPU/board sensors);
+        // every legacy source below only fills what LHM lacks.
+        if let Some(sensors) = self.lhm.latest(Duration::from_secs(3)) {
+            super::lhm::apply(&sensors, &mut self.cached);
+        }
         // NVIDIA first (authoritative temp/power/clocks/VRAM/util);
         // DXGI/PDH fill whatever NVML leaves empty.
         let nv = super::nvml::poll();
-        self.cached.gpu_temp_c = nv.temp_c;
-        self.cached.gpu_power_w = nv.power_w;
-        self.cached.gpu_core_mhz = nv.core_mhz;
-        self.cached.gpu_mem_mhz = nv.mem_mhz;
-        if let Some(u) = nv.util_percent {
-            self.cached.gpu_percent = Some(u);
+        if self.cached.gpu_temp_c.is_none() {
+            self.cached.gpu_temp_c = nv.temp_c;
         }
-        match (nv.vram_used_mb, nv.vram_total_mb) {
-            (Some(u), Some(t)) if t > 0 => {
-                self.cached.gpu_vram_used_mb = u;
-                self.cached.gpu_vram_total_mb = t;
+        if self.cached.gpu_power_w.is_none() {
+            self.cached.gpu_power_w = nv.power_w;
+        }
+        if self.cached.gpu_core_mhz.is_none() {
+            self.cached.gpu_core_mhz = nv.core_mhz;
+        }
+        if self.cached.gpu_mem_mhz.is_none() {
+            self.cached.gpu_mem_mhz = nv.mem_mhz;
+        }
+        if self.cached.gpu_percent.is_none() {
+            if let Some(u) = nv.util_percent {
+                self.cached.gpu_percent = Some(u);
             }
-            _ => {
-                let (vu, vt) = vram_mb();
-                self.cached.gpu_vram_used_mb = vu;
-                self.cached.gpu_vram_total_mb = vt;
+        }
+        if self.cached.gpu_vram_total_mb == 0 {
+            match (nv.vram_used_mb, nv.vram_total_mb) {
+                (Some(u), Some(t)) if t > 0 => {
+                    self.cached.gpu_vram_used_mb = u;
+                    self.cached.gpu_vram_total_mb = t;
+                }
+                _ => {
+                    let (vu, vt) = vram_mb();
+                    self.cached.gpu_vram_used_mb = vu;
+                    self.cached.gpu_vram_total_mb = vt;
+                }
             }
         }
         // Adapt the NEXT interval to how much just moved.
