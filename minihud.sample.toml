@@ -9,28 +9,23 @@
 x = 16
 y = 16
 
-# Text opacity, 0.2..=1.0. Applies to text/graph only;
-# the window background itself stays opaque.
+# Text opacity, 0.2..=1.0. Applies to text only; the window
+# background itself stays opaque.
 opacity = 0.95
 
-# Body font size in pt, clamped 10..=28. Headline FPS renders ~1.8x.
+# Body font size in pt, clamped 10..=28.
 text_size = 14.0
 
-# Game frametime graph (fixed 50ms ceiling + 16.7ms target line).
-show_frametime_graph = true
-
 # Hardware poll interval in ms while values move, clamped 50..=5000.
-# Covers CPU/RAM/GPU/VRAM/temp/power/clocks (PDH/NVML/LHM).
-update_hw_ms = 700
+# All values come from LibreHardwareMonitor; 50ms is the floor.
+update_hw_ms = 50
 
 # Idle backoff cap in ms, clamped to >= update_hw_ms, <= 10000.
 # After 4 quiet polls the interval doubles toward this.
 idle_hw_ms = 2000
 
-# Start click-through (mouse passes to the game). F8 toggles live.
+# Start click-through (mouse passes to whatever is underneath).
+# F8 toggles live.
 click_through = true
 
-# NOTE: per-app tracking has no config key — use the CLI:
-#   minihud.exe --process Overwatch.exe   (name substring, any case)
-#   minihud.exe --process 1234            (exact PID)
 # Keys: F7 show/hide, F8 click-through, Shift+F7 clean quit.

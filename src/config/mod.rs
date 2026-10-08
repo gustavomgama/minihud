@@ -8,7 +8,6 @@ pub struct Config {
     pub y: i32,
     pub opacity: f32,
     pub text_size: f32,
-    pub show_frametime_graph: bool,
     pub update_hw_ms: u64,
     pub idle_hw_ms: u64,
     pub click_through: bool,
@@ -21,8 +20,7 @@ impl Default for Config {
             y: 16,
             opacity: 0.95,
             text_size: 14.0,
-            show_frametime_graph: true,
-            update_hw_ms: 700,
+            update_hw_ms: 50,
             idle_hw_ms: 2000,
             click_through: true,
         }
@@ -54,7 +52,7 @@ impl Config {
             }
         };
         // Clamp everything with a blast radius. update_hw_ms=0 would
-        // busy-poll PDH every frame; absurd x/y parks the window
+        // busy-poll sensors every frame; absurd x/y parks the window
         // off-screen with no way to grab it back.
         cfg.update_hw_ms = cfg.update_hw_ms.clamp(50, 5000);
         cfg.idle_hw_ms = cfg.idle_hw_ms.clamp(cfg.update_hw_ms, 10000);

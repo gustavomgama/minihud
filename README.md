@@ -1,53 +1,43 @@
 # minihud
 
-Minimal Windows performance overlay. FPS + frametime + light system stats.
-Rust + `windows-rs` + Direct2D. No UI framework.
+Minimal Windows hardware overlay. System stats only, no per-app tracking.
+Rust + `windows-rs` + Direct2D. One data source: LibreHardwareMonitor.
 
-## Shows (RTSS-style vertical stack, "--" when silent)
+## Shows ("--" wherever no data exists)
 
-- App name + big FPS (tinted: green ≥120, amber ≥60, red below;
-  digits always accompany color), game frametime graph (fixed 50ms
-  ceiling so steady rates read flat, 16.7ms target line), detected
-  graphics API (D3D12/D3D11/Vulkan/D3D9/OpenGL from loaded runtime
-  dlls; `--` when the process blocks inspection)
+- CPU: load %, temp °C, power W, RAM used/total
+- GPU: load %, temp °C, power W, core/mem clocks, VRAM used/total
 - Two-tier text (dim labels, bright values); digits step exactly when
-  source data steps (no animated transitions between polls)
-- min / avg / max / 1% low frametime, game Hz + display Hz
-- CPU: load %, avg clock MHz (via CallNtPowerInformation), temp °C,
-  power W (via LibreHardwareMonitor; `--` where the board yields
-  nothing), RAM used/total
-- GPU: load %, temp °C, power W, core/mem clocks (via NVML on NVIDIA;
-  core voltage in mV has no NVML API and is omitted, not faked),
-  VRAM used/total
+  source data steps
 
 ## Keys
 
 - F7: show/hide overlay
 - F8: click-through on/off. With it OFF, drag the overlay anywhere
   with the left mouse button; position is saved next to the exe.
+- Shift+F7: clean quit
 
 ## Config
 
 `minihud.toml` next to the exe (position, text size, opacity for text,
-graph on/off, hw poll interval, click-through default).
+hw poll interval, click-through default). Any listed key overrides its
+default; unknown keys are ignored.
 
-Cadence is adaptive around a 700ms global default, not fixed: HW polls
-at `update_hw_ms` (default 700) while values move and backs off toward
-`idle_hw_ms` (default 2000) when quiet; the APP row recomputes at
-50ms minimum while tracking a game, 1000ms while listening (ETW delivers in
-~1s batches regardless); frames only present when the pixels would
-differ. The frame log shows live `hwms=` and skipped-frame counts. Exceptions, all deliberate: the 8/30ms main-loop
-heartbeat (hotkey latency, costs nothing when skipping), the 1s ETW
-flush floor (platform minimum), ETW retry backoff and the 2s device-
-recovery timer (recovery paths, not data rates).
+Cadence is adaptive with a 50ms floor, not fixed: HW polls at
+`update_hw_ms` (default 50) while values move and backs off toward
+`idle_hw_ms` (default 2000) when quiet; frames only present when the
+pixels would differ. The frame log shows live `hwms=` and
+skipped-frame counts. Deliberate exceptions: the 8/30ms main-loop
+heartbeat (hotkey latency, costs nothing when skipping) and the 2s
+device-recovery timer (recovery path, not a data rate).
 
-## Hardware backend: LibreHardwareMonitor (primary)
+## Hardware backend: LibreHardwareMonitor (only)
 
 LHM is .NET-only, so a persistent PowerShell sidecar
 (`tools/lhm/lhm-bridge.ps1`) hosts `LibreHardwareMonitorLib.dll` and
 emits one JSON sensor dump per poll. Rust reads it on a dedicated
-thread — the main loop never blocks on it. PDH/NVML/DXGI remain as
-automatic fallbacks wherever LHM has no data.
+thread — the main loop never blocks on it. There are no fallback
+backends: anything LHM lacks shows `--`, never a guess.
 
 One-time DLL fetch (gitignored, ~700KB, pinned 0.9.4):
 
@@ -58,18 +48,13 @@ Copy-Item lhm-pkg\lib\net472\LibreHardwareMonitorLib.dll tools\lhm\
 ```
 
 For runs outside cargo, copy `tools\lhm\lhm-bridge.ps1` and the DLL
-next to `minihud.exe`. Without them the HUD degrades to the legacy
-backends (CPU temp/power read `--`).
+next to `minihud.exe`. Without them every row reads `--`.
 
 ## Notes
 
-- Per-app FPS comes from ETW DXGI present events (flip + multiplane
-  overlay); needs elevation, otherwise the APP row says so.
-- Anti-cheat / protected games deny process inspection: their API row
-  reads `--` (module list unreadable). Detection is proven on
-  inspectable processes.
-- GPU % prefers NVML utilization, falls back to the `GPU Engine(*)`
-  PDH counter; VRAM prefers NVML, falls back to DXGI (discrete adapter
-  with the most dedicated memory, Basic Render Driver skipped).
-- GPU temperature needs vendor APIs (NVAPI/ADL) and is not wired yet.
+- No per-app frame/FPS/frametime tracking: the only external sources
+  on Windows are ETW present events and API hooking (injection,
+  anti-cheat consequences). Neither ships here by decision.
+- Core voltage (mV) has no readable source (no NVML API, LHM SuperIO
+  absent on most boards) and is omitted, not faked.
 - Window is opaque for now; true per-pixel alpha is a future milestone.

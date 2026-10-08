@@ -1,12 +1,10 @@
-//! LibreHardwareMonitor sidecar feed.
+//! LibreHardwareMonitor sidecar feed: the SOLE hardware data source.
 //!
 //! LHM is .NET-only, so a persistent `powershell` host runs
 //! `tools/lhm/lhm-bridge.ps1` and emits one JSON sensor dump per blank
 //! line on stdin. This module owns that child on a dedicated thread:
 //! the main loop NEVER blocks on it — `latest()` just reads the last
-//! good sample (or gets None and the PDH/NVML/DXGI fallbacks cover).
-//! Child death respawns with a delay; a missing DLL parks loudly once
-//! and retries every 30s (fresh clone? no — see README fetch recipe).
+//! good sample, and rows read "--" until the first one lands.
 
 use serde::Deserialize;
 use std::io::{BufRead, BufReader, Write};
@@ -41,8 +39,8 @@ impl LhmFeed {
         Self { latest }
     }
 
-    /// Last sample if younger than `max_age`, else None (caller falls
-    /// back to PDH/NVML/DXGI — never blocks, never fails).
+    /// Last sample if younger than `max_age`, else None (rows read
+    /// "--"). Never blocks, never fails.
     pub fn latest(&self, max_age: Duration) -> Option<Vec<LhmSensor>> {
         let g = self.latest.lock().ok()?;
         let (t, v) = g.as_ref()?;
@@ -117,7 +115,7 @@ impl LhmFeed {
                     tracing::debug!("lhm bridge: bad JSON line ({e})");
                 }
             }
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(Duration::from_millis(500));
         }
     }
 }
@@ -173,6 +171,13 @@ pub fn apply(sensors: &[LhmSensor], stats: &mut super::HwStats) {
     if let Some(v) = find("Cpu:", "Power", &["Package", "CPU Package"]) {
         stats.cpu_power_w = Some(v as f32);
     }
+    // LHM reports memory in GB; everything downstream is MB.
+    let mem_used = find("Memory:", "Data", &["Memory Used", "Used Memory"]);
+    let mem_avail = find("Memory:", "Data", &["Memory Available", "Available Memory"]);
+    if let (Some(u), Some(a)) = (mem_used, mem_avail) {
+        stats.ram_used_mb = Some((u * 1024.0) as u64);
+        stats.ram_total_mb = Some(((u + a) * 1024.0) as u64);
+    }
     // First discrete GPU block wins (single-dGPU assumption, documented).
     let gpu_hw = sensors
         .iter()
@@ -209,8 +214,8 @@ pub fn apply(sensors: &[LhmSensor], stats: &mut super::HwStats) {
         let total = gfind("SmallData", &["GPU Memory Total"]);
         if let (Some(u), Some(t)) = (used, total) {
             if t > 0.0 {
-                stats.gpu_vram_used_mb = u as u64;
-                stats.gpu_vram_total_mb = t as u64;
+                stats.gpu_vram_used_mb = Some(u as u64);
+                stats.gpu_vram_total_mb = Some(t as u64);
             }
         }
     }

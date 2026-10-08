@@ -28,7 +28,6 @@ pub struct Overlay {
     pub dwrite: IDWriteFactory,
     pub rt: Option<ID2D1HwndRenderTarget>,
     pub text_fmt: Option<IDWriteTextFormat>,
-    pub text_fmt_big: Option<IDWriteTextFormat>,
     interactive: std::sync::atomic::AtomicBool,
     // Remembered for device-loss recovery (driver update/TDR): the
     // render target + all brushes/fonts die with the device and must be
@@ -130,7 +129,6 @@ impl Overlay {
             dwrite,
             rt: None,
             text_fmt: None,
-            text_fmt_big: None,
             interactive: std::sync::atomic::AtomicBool::new(false),
             w,
             h,
@@ -177,27 +175,12 @@ impl Overlay {
                 PCWSTR(wstr("en-us").as_ptr()),
             )?
         };
-        // Headline number (RTSS-style big FPS), ~1.8x the body size.
-        let fmt_big = unsafe {
-            self.dwrite.CreateTextFormat(
-                PCWSTR(wstr("Consolas").as_ptr()),
-                None,
-                DWRITE_FONT_WEIGHT_NORMAL,
-                DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                (font_size * 1.8).clamp(18.0, 48.0),
-                PCWSTR(wstr("en-us").as_ptr()),
-            )?
-        };
         unsafe {
             fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)?;
             fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
-            fmt_big.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)?;
-            fmt_big.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
         }
         self.rt = Some(rt);
         self.text_fmt = Some(fmt);
-        self.text_fmt_big = Some(fmt_big);
         Ok(())
     }
 
@@ -251,10 +234,6 @@ impl Overlay {
         }
     }
 
-    pub fn show(&self) {
-        self.set_visible(true);
-    }
-
     pub fn begin_draw(&self) {
         use std::sync::atomic::Ordering;
         // Visible feedback: lighter background while interactive (F8 off),
@@ -294,7 +273,6 @@ impl Overlay {
     pub fn invalidate(&mut self) {
         self.rt = None;
         self.text_fmt = None;
-        self.text_fmt_big = None;
     }
 
     /// Rebuild the render target if missing. Returns the underlying
@@ -312,8 +290,5 @@ impl Overlay {
     }
     pub fn fmt(&self) -> Option<&IDWriteTextFormat> {
         self.text_fmt.as_ref()
-    }
-    pub fn fmt_big(&self) -> Option<&IDWriteTextFormat> {
-        self.text_fmt_big.as_ref()
     }
 }
