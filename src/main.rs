@@ -1,5 +1,4 @@
 mod config;
-mod hotkey;
 mod hw;
 mod timing;
 mod ui;
@@ -13,7 +12,7 @@ use win::overlay::Overlay;
 use windows::core::Result;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_F7, VK_F8};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, WM_HOTKEY, WM_QUIT,
+    DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, WM_QUIT,
 };
 
 fn main() -> Result<()> {
@@ -24,18 +23,15 @@ fn main() -> Result<()> {
     let overlay = Overlay::new("minihud", cfg.x, cfg.y, 460, win_h, cfg.text_size)?;
     tracing::info!("overlay hwnd: {:?}", overlay.hwnd);
     overlay.set_click_through(cfg.click_through);
-    match hotkey::register(overlay.hwnd) {
-        Ok(()) => tracing::info!("hotkeys: F7 toggle, F8 click-through"),
-        Err(e) => tracing::warn!("hotkey register failed: {e}"),
-    }
+    tracing::info!("hotkeys: F7 toggle, F8 click-through (polled)");
     let mut timer = PresentTimer::new(180);
     let mut hw = HwPoller::new(cfg.update_hw_ms);
     let mut visible = true;
     let mut click_through = cfg.click_through;
     let mut msg = MSG::default();
     let mut frames: u64 = 0;
-    // Poll fallback: RegisterHotKey can silently fail (e.g. second instance
-    // holds F7/F8). Edge-triggered GetAsyncKeyState keeps F7/F8 working.
+    // Single path: edge-triggered GetAsyncKeyState poll. RegisterHotKey was
+    // removed — it double-fired with the poll on the same press.
     let mut f7_down = false;
     let mut f8_down = false;
     // Create brushes once outside the loop (cheaper, less flicker).
@@ -52,21 +48,7 @@ fn main() -> Result<()> {
         while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
             match msg.message {
                 WM_QUIT => {
-                    hotkey::unregister(overlay.hwnd);
                     return Ok(());
-                }
-                WM_HOTKEY => {
-                    let id = msg.wParam.0 as i32;
-                    if id == hotkey::HOTKEY_ID_TOGGLE {
-                        visible = !visible;
-                        overlay.set_visible(visible);
-                        tracing::info!("visible={visible} (F7 hotkey)");
-                    }
-                    if id == hotkey::HOTKEY_ID_CLICKTHROUGH {
-                        click_through = !click_through;
-                        overlay.set_click_through(click_through);
-                        tracing::info!("click_through={click_through} (F8 hotkey)");
-                    }
                 }
                 _ => unsafe {
                     let _ = TranslateMessage(&msg);
@@ -85,14 +67,14 @@ fn main() -> Result<()> {
         if f7_now && !f7_down {
             visible = !visible;
             overlay.set_visible(visible);
-            tracing::info!("visible={visible} (F7 poll)");
+            tracing::info!("visible={visible} (F7)");
         }
         f7_down = f7_now;
         let f8_now = unsafe { GetAsyncKeyState(VK_F8.0 as i32) } < 0;
         if f8_now && !f8_down {
             click_through = !click_through;
             overlay.set_click_through(click_through);
-            tracing::info!("click_through={click_through} (F8 poll)");
+            tracing::info!("click_through={click_through} (F8)");
         }
         f8_down = f8_now;
         if frames % 300 == 1 {
