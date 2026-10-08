@@ -15,7 +15,7 @@
 use super::State;
 use std::collections::VecDeque;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
 use windows::core::{GUID, PCWSTR};
@@ -116,11 +116,66 @@ pub fn run(state: Arc<Mutex<State>>) {
     use windows::Win32::System::Threading::GetCurrentProcessId;
     unsafe {
         SELF_PID.store(GetCurrentProcessId() as u64, Ordering::Relaxed);
-        run_inner(&state)
+    }
+    // Supervisor: restart the consumer when it dies unexpectedly
+    // (session killed externally, transient StartTrace failure).
+    // Bounded backoff, then park — no infinite retry storm.
+    // Access-denied never retries: elevation won't appear mid-run.
+    // SHUTDOWN (clean quit) breaks out without retrying.
+    let backoff = [2u64, 5, 15, 30, 60];
+    for (i, secs) in backoff.iter().enumerate() {
+        let retry = unsafe { run_inner(&state) };
+        if !retry || SHUTDOWN.load(Ordering::Relaxed) {
+            break;
+        }
+        if i + 1 == backoff.len() {
+            tracing::warn!("appstats: retries exhausted, parking consumer");
+            set_err(&state, "etw consumer stopped");
+            break;
+        }
+        tracing::warn!(
+            "appstats: consumer ended, retry {}/{} in {secs}s",
+            i + 1,
+            backoff.len()
+        );
+        std::thread::sleep(std::time::Duration::from_secs(*secs));
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            break;
+        }
     }
 }
 
-unsafe fn run_inner(state: &Arc<Mutex<State>>) {
+/// Set by stop_session: tells the supervisor the exit was deliberate.
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// Stop the real-time session (clean quit path). Kernel sessions
+/// survive process death, so without this every run leaves one behind
+/// until the next start's stale-stop. Idempotent: stopping a missing
+/// session is a debug-level no-op.
+pub fn stop_session() {
+    SHUTDOWN.store(true, Ordering::Relaxed);
+    unsafe {
+        let name = wide_nul(SESSION_NAME);
+        let mut props = EVENT_TRACE_PROPERTIES::default();
+        props.Wnode.BufferSize = std::mem::size_of::<EVENT_TRACE_PROPERTIES>() as u32;
+        let err = ControlTraceW(
+            CONTROLTRACE_HANDLE::default(),
+            PCWSTR(name.as_ptr()),
+            &mut props,
+            EVENT_TRACE_CONTROL_STOP,
+        );
+        if err == WIN32_ERROR(0) {
+            tracing::info!("appstats: ETW session stopped");
+        } else {
+            tracing::debug!("appstats: stop_session: {err:?}");
+        }
+    }
+}
+
+/// Starts the session and consumes until it ends.
+/// Returns false when retrying is pointless (access denied: elevation
+/// won't appear mid-run); true for anything worth another attempt.
+unsafe fn run_inner(state: &Arc<Mutex<State>>) -> bool {
     // Stop any stale session from a previous (crashed) run.
     {
         let name = wide_nul(SESSION_NAME);
@@ -162,11 +217,12 @@ unsafe fn run_inner(state: &Arc<Mutex<State>>) {
         if err == ERROR_ACCESS_DENIED {
             tracing::warn!("appstats: StartTrace denied; run elevated for per-app stats");
             set_err(state, "run as admin");
+            return false;
         } else {
             tracing::warn!("appstats: StartTrace failed: {err:?}");
             set_err(state, format!("etw error {}", err.0));
         }
-        return;
+        return true;
     }
 
     // ID filter: Present_Start/Stop + MPO_Start/Stop (EVENT_FILTER_EVENT_ID
@@ -203,7 +259,7 @@ unsafe fn run_inner(state: &Arc<Mutex<State>>) {
     if err != WIN32_ERROR(0) {
         tracing::warn!("appstats: EnableTraceEx2 failed: {err:?}");
         set_err(state, format!("etw error {}", err.0));
-        return;
+        return true;
     }
 
     // Leak one Arc ref as callback context (process-lifetime consumer
@@ -222,11 +278,18 @@ unsafe fn run_inner(state: &Arc<Mutex<State>>) {
     if trace.Value == u64::MAX {
         tracing::warn!("appstats: OpenTrace failed");
         set_err(state, "etw open failed");
-        return;
+        return true;
     }
     tracing::info!("appstats: ETW consumer running (DXGI Present_Start/Stop)");
     let err = ProcessTrace(&[trace], None, None);
-    tracing::warn!("appstats: ProcessTrace ended: {err:?}");
+    // A deliberate stop (clean quit) is routine, not a warning; an
+    // unexpected end keeps WARN so it gets noticed.
+    if SHUTDOWN.load(Ordering::Relaxed) {
+        tracing::debug!("appstats: ProcessTrace ended on shutdown: {err:?}");
+    } else {
+        tracing::warn!("appstats: ProcessTrace ended: {err:?}");
+    }
+    true
 }
 
 unsafe extern "system" fn event_callback(record: *mut EVENT_RECORD) {

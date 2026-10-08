@@ -13,13 +13,14 @@ use ui::{draw_graph, draw_text, TextBrush};
 use win::overlay::Overlay;
 use windows::core::Result;
 use windows::Win32::System::Threading::GetCurrentProcessId;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_F7, VK_F8};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_F7, VK_F8, VK_SHIFT};
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, WM_QUIT,
 };
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
+    tracing::info!("minihud v{}", env!("CARGO_PKG_VERSION"));
     let args = parse_args();
     let cfg = Config::load();
     tracing::info!("config at {:?}: {:?}", Config::path(), cfg);
@@ -27,10 +28,10 @@ fn main() -> Result<()> {
         tracing::info!("process filter: {}", f.label());
     }
     let win_h = 436; // fixed: stable rows, no resize flicker
-    let overlay = Overlay::new("minihud", cfg.x, cfg.y, 500, win_h, cfg.text_size)?;
+    let mut overlay = Overlay::new("minihud", cfg.x, cfg.y, 500, win_h, cfg.text_size)?;
     tracing::info!("overlay hwnd: {:?}", overlay.hwnd);
     overlay.set_click_through(cfg.click_through);
-    tracing::info!("hotkeys: F7 toggle, F8 click-through (polled)");
+    tracing::info!("hotkeys: F7 toggle, F8 click-through, Shift+F7 quit (polled)");
     let mut timer = PresentTimer::new(180);
     let mut hw = HwPoller::new(cfg.update_hw_ms);
     // Per-app presents via ETW (needs elevation; degrades to placeholder).
@@ -46,19 +47,26 @@ fn main() -> Result<()> {
     let mut f8_down = false;
     // Create brushes once outside the loop (cheaper, less flicker).
     // Text alpha follows cfg.opacity (window itself is opaque for now).
+    // Dropped + rebuilt if the D2D device is lost (see end_draw below).
     let text_alpha = cfg.opacity.clamp(0.2, 1.0);
-    let white_brush = overlay
+    let mut white_brush = overlay
         .rt()
         .and_then(|rt| TextBrush::new(rt, 1.0, 1.0, 1.0, text_alpha).ok());
     if white_brush.is_none() {
         tracing::warn!("no render target; overlay will be empty");
     }
-    loop {
+    // Last device-recovery attempt (throttled: retry every 2s, not per frame).
+    let mut last_recover: Option<std::time::Instant> = None;
+    // 'run: the WM_QUIT arm below sits inside the message-pump `while`,
+    // so a bare `break` would only exit the pump and the overlay would
+    // keep running. Labeled break quits for real.
+    'run: loop {
         // Non-blocking pump: GetMessageW would block and freeze rendering.
         while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
             match msg.message {
                 WM_QUIT => {
-                    return Ok(());
+                    tracing::info!("quit requested (WM_QUIT)");
+                    break 'run;
                 }
                 _ => unsafe {
                     let _ = TranslateMessage(&msg);
@@ -73,8 +81,15 @@ fn main() -> Result<()> {
         let stats = hw.cached().clone();
         frames += 1;
         // Poll fallback for hotkeys (edge-triggered).
+        let shift_down = unsafe { GetAsyncKeyState(VK_SHIFT.0 as i32) } < 0;
         let f7_now = unsafe { GetAsyncKeyState(VK_F7.0 as i32) } < 0;
         if f7_now && !f7_down {
+            // Shift+F7: clean quit (stops the ETW session, no lingering
+            // kernel trace). Plain F7 toggles visibility.
+            if shift_down {
+                tracing::info!("quit requested (Shift+F7)");
+                break 'run;
+            }
             visible = !visible;
             overlay.set_visible(visible);
             tracing::info!("visible={visible} (F7)");
@@ -274,10 +289,44 @@ fn main() -> Result<()> {
                 let _ = draw_text(rt, fmt, brush, 8.0, 392.0, &hz_game);
                 let _ = draw_text(rt, fmt, brush, 8.0, 410.0, &display_hz());
             }
-            let _ = overlay.end_draw();
+            // EndDraw fails when the D2D device is lost (driver update,
+            // TDR, GPU switch). The old code ignored this and froze on a
+            // stale frame forever; instead drop the dead resources and
+            // rebuild on a 2s timer until the device is back.
+            if let Err(e) = overlay.end_draw() {
+                tracing::warn!("end_draw failed (device lost?): {e:?}; rebuilding");
+                overlay.invalidate();
+                white_brush = None;
+                last_recover = Some(std::time::Instant::now());
+            }
+        }
+        // Device recovery runs even when hidden so un-hiding never shows
+        // a dead target. Throttled to 2s to avoid log spam while the
+        // device is gone.
+        if overlay.rt().is_none()
+            && last_recover.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(2))
+        {
+            match overlay.ensure_target() {
+                Ok(()) => {
+                    if let Some(rt) = overlay.rt() {
+                        white_brush = TextBrush::new(rt, 1.0, 1.0, 1.0, text_alpha).ok();
+                    }
+                    tracing::info!("render target rebuilt");
+                    last_recover = None;
+                }
+                Err(e) => {
+                    tracing::debug!("render target rebuild failed: {e:?}");
+                    last_recover = Some(std::time::Instant::now());
+                }
+            }
         }
         std::thread::sleep(std::time::Duration::from_millis(8));
     }
+    // Clean exit: stop the ETW session so no kernel trace lingers, then
+    // report how to restart.
+    appstats::etw::stop_session();
+    tracing::info!("minihud stopped cleanly");
+    Ok(())
 }
 
 /// "12.1/31.9 GB" or "512/1024 MB" — GB when the total is 2+ GB.

@@ -30,6 +30,12 @@ pub struct Overlay {
     pub text_fmt: Option<IDWriteTextFormat>,
     pub text_fmt_big: Option<IDWriteTextFormat>,
     interactive: std::sync::atomic::AtomicBool,
+    // Remembered for device-loss recovery (driver update/TDR): the
+    // render target + all brushes/fonts die with the device and must be
+    // recreated at the same size.
+    w: i32,
+    h: i32,
+    font_size: f32,
 }
 
 fn wstr(s: &str) -> Vec<u16> {
@@ -126,6 +132,9 @@ impl Overlay {
             text_fmt: None,
             text_fmt_big: None,
             interactive: std::sync::atomic::AtomicBool::new(false),
+            w,
+            h,
+            font_size,
         };
         ov.create_resources(w, h, font_size)?;
         unsafe {
@@ -275,6 +284,25 @@ impl Overlay {
             unsafe {
                 rt.EndDraw(None, None)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Drop all device-dependent resources after EndDraw reports the
+    /// device lost (driver update, TDR, GPU switch). The window keeps
+    /// its last frame until `ensure_target` rebuilds.
+    pub fn invalidate(&mut self) {
+        self.rt = None;
+        self.text_fmt = None;
+        self.text_fmt_big = None;
+    }
+
+    /// Rebuild the render target if missing. Returns the underlying
+    /// error when the device is still gone; callers retry on a timer,
+    /// not every frame, to avoid log spam.
+    pub fn ensure_target(&mut self) -> Result<()> {
+        if self.rt.is_none() {
+            self.create_resources(self.w, self.h, self.font_size)?;
         }
         Ok(())
     }

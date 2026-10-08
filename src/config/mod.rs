@@ -37,10 +37,28 @@ impl Config {
 
     pub fn load() -> Self {
         let p = Self::path();
-        std::fs::read_to_string(p)
-            .ok()
-            .and_then(|s| toml::from_str(&s).ok())
-            .unwrap_or_default()
+        let raw = match std::fs::read_to_string(&p) {
+            Ok(s) => s,
+            Err(_) => return Self::default(),
+        };
+        let mut cfg: Self = match toml::from_str(&raw) {
+            Ok(c) => c,
+            Err(e) => {
+                // Fail visibly, keep running on defaults: a typo must not
+                // silently wedge the overlay into a weird state.
+                tracing::warn!("config {:?} invalid ({e}); using defaults", p);
+                return Self::default();
+            }
+        };
+        // Clamp everything with a blast radius. update_hw_ms=0 would
+        // busy-poll PDH every frame; absurd x/y parks the window
+        // off-screen with no way to grab it back.
+        cfg.update_hw_ms = cfg.update_hw_ms.clamp(50, 5000);
+        cfg.opacity = cfg.opacity.clamp(0.2, 1.0);
+        cfg.text_size = cfg.text_size.clamp(10.0, 28.0);
+        cfg.x = cfg.x.clamp(-10000, 10000);
+        cfg.y = cfg.y.clamp(-10000, 10000);
+        cfg
     }
 
     pub fn save(&self) {
