@@ -60,6 +60,10 @@ fn qpc_now() -> i64 {
 pub struct AppTracker {
     state: Arc<Mutex<State>>,
     cache: Arc<Mutex<(Instant, Option<AppFrame>)>>,
+    /// PID currently shown. It keeps its slot while it has ANY event in
+    /// the 2s prune horizon; only 2s of total silence drops it back to
+    /// "-- (listening…)". Newcomers still need >= 2 presents in 1s.
+    incumbent: Arc<Mutex<Option<u32>>>,
 }
 
 impl AppTracker {
@@ -70,6 +74,7 @@ impl AppTracker {
         let tracker = Self {
             state: Arc::new(Mutex::new(State::default())),
             cache: Arc::new(Mutex::new((Instant::now() - TOP_TTL, None))),
+            incumbent: Arc::new(Mutex::new(None)),
         };
         let state = tracker.state.clone();
         std::thread::spawn(move || etw::run(state));
@@ -122,7 +127,34 @@ impl AppTracker {
                 best = Some((pid, n));
             }
         }
-        let (pid, n) = best?;
+        // Winner, or the incumbent if it is still alive (any event in the
+        // 2s horizon). This stops flapping on sparse stretches: the row
+        // shows the dip honestly instead of blanking to listening.
+        let pid = match best {
+            Some((pid, _)) => {
+                if let Ok(mut inc) = self.incumbent.lock() {
+                    *inc = Some(pid);
+                }
+                pid
+            }
+            None => {
+                let inc = self.incumbent.lock().ok().and_then(|g| *g);
+                match inc {
+                    Some(p) if p != exclude_pid && st.events.contains_key(&p) => p,
+                    _ => {
+                        if let Ok(mut g) = self.incumbent.lock() {
+                            *g = None;
+                        }
+                        return None;
+                    }
+                }
+            }
+        };
+        let n = st
+            .events
+            .get(&pid)
+            .map(|q| q.iter().filter(|t| **t >= win_from).count())
+            .unwrap_or(0);
         let q = st.events.get(&pid)?;
         // avg_ms from consecutive QPC intervals inside the 1s window.
         let mut sum = 0.0f64;

@@ -30,6 +30,12 @@ const SESSION_NAME: &str = "minihud-present";
 /// DXGI Present_Start / Present_Stop (PresentMon: Present_Start=0x2A).
 const PRESENT_START_ID: u16 = 42;
 const PRESENT_STOP_ID: u16 = 43;
+/// DXGI PresentMultiplaneOverlay_Start/Stop (0x37/0x38, task 14).
+/// Fullscreen games with MPO planes present through these INSTEAD of
+/// Present_Start — without them we count a fraction of frames and the
+/// APP row flaps back to "-- (listening…)".
+const MPO_START_ID: u16 = 0x37;
+const MPO_STOP_ID: u16 = 0x38;
 /// Analytic channel + Events keyword (matches the manifest descriptors).
 const DXGI_KEYWORDS: u64 = 0x8000_0000_0000_0002;
 const MAX_QUEUE: usize = 720;
@@ -43,6 +49,19 @@ static DROPPED: AtomicU64 = AtomicU64::new(0);
 pub fn dropped() -> u64 {
     DROPPED.load(Ordering::Relaxed)
 }
+
+/// (start_events, stop_events) seen across all pids. Start should ≈
+/// Stop; a big gap means loss somewhere or an unhandled present path.
+pub fn seen() -> (u64, u64) {
+    (
+        SEEN_START.load(Ordering::Relaxed),
+        SEEN_STOP.load(Ordering::Relaxed),
+    )
+}
+
+/// Events seen per DXGI present opcode, for diagnostics.
+static SEEN_START: AtomicU64 = AtomicU64::new(0);
+static SEEN_STOP: AtomicU64 = AtomicU64::new(0);
 
 fn wide_nul(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -104,9 +123,16 @@ unsafe fn run_inner(state: &Arc<Mutex<State>>) {
         return;
     }
 
-    // ID filter: Present_Start + Present_Stop only (EVENT_FILTER_EVENT_ID
+    // ID filter: Present_Start/Stop + MPO_Start/Stop (EVENT_FILTER_EVENT_ID
     // is variable-length: FilterIn u8, Reserved u8, Count u16, Events…).
-    let id_filter: [u16; 4] = [0x0001, 2, PRESENT_START_ID, PRESENT_STOP_ID];
+    let id_filter: [u16; 6] = [
+        0x0001,
+        4,
+        PRESENT_START_ID,
+        PRESENT_STOP_ID,
+        MPO_START_ID,
+        MPO_STOP_ID,
+    ];
     let filter_desc = EVENT_FILTER_DESCRIPTOR {
         Ptr: id_filter.as_ptr() as u64,
         Size: (id_filter.len() * 2) as u32,
@@ -162,8 +188,17 @@ unsafe extern "system" fn event_callback(record: *mut EVENT_RECORD) {
         return;
     }
     let r = &*record;
-    if r.EventHeader.ProviderId != DXGI_GUID || r.EventHeader.EventDescriptor.Id != PRESENT_START_ID
-    {
+    if r.EventHeader.ProviderId != DXGI_GUID {
+        return;
+    }
+    // Either flip-model or MPO presents mark one submitted frame.
+    let id = r.EventHeader.EventDescriptor.Id;
+    if id == PRESENT_START_ID || id == MPO_START_ID {
+        SEEN_START.fetch_add(1, Ordering::Relaxed);
+    } else if id == PRESENT_STOP_ID || id == MPO_STOP_ID {
+        SEEN_STOP.fetch_add(1, Ordering::Relaxed);
+        return;
+    } else {
         return;
     }
     let pid = r.EventHeader.ProcessId;

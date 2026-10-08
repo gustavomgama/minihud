@@ -89,8 +89,9 @@ fn main() -> Result<()> {
                 Some(a) => format!("{} {:.0}fps {:.2}ms", a.name, a.fps, a.avg_ms),
                 None => apps.status_text(),
             };
+            let (etw_start, etw_stop) = appstats::etw::seen();
             tracing::info!(
-                "frame {frames}: fps={:.0} avg_ms={:.2} cpu={:.0}% ram={}/{}MB vram={}/{}MB gpu={:?} app=[{app_txt}] etw_dropped={}",
+                "frame {frames}: fps={:.0} avg_ms={:.2} cpu={:.0}% ram={}/{}MB vram={}/{}MB gpu={:?} app=[{app_txt}] etw_dropped={} etw_start={etw_start} etw_stop={etw_stop}",
                 s.fps,
                 s.avg_ms,
                 stats.cpu_percent,
