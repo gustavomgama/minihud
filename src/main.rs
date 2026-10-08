@@ -97,7 +97,7 @@ fn main() -> Result<()> {
             let snap = apps
                 .snapshot()
                 .iter()
-                .map(|(n, _, c)| format!("{n}:{c}"))
+                .map(|(n, _, c, a)| format!("{n}:{c}/{a}"))
                 .collect::<Vec<_>>()
                 .join(",");
             tracing::info!(
@@ -177,10 +177,15 @@ fn main() -> Result<()> {
                 let _ = draw_text(rt, big, brush, 8.0, 20.0, &fps_txt);
                 if cfg.show_frametime_graph {
                     if let Some(a) = &app {
-                        let _ = draw_graph(rt, brush, &a.recent_ms, 150.0, 8.0, 300.0, 44.0);
+                        // Fixed 50ms ceiling: steady rates render flat.
+                        let _ = draw_graph(rt, brush, &a.recent_ms, 150.0, 8.0, 300.0, 44.0, 50.0);
                     }
                 }
-                let _ = draw_text(rt, fmt, brush, 8.0, 108.0, "API  DXGI");
+                let api_txt = match &app {
+                    Some(a) => format!("API  {}", a.api),
+                    None => "API  --".to_string(),
+                };
+                let _ = draw_text(rt, fmt, brush, 8.0, 108.0, &api_txt);
                 let _ = draw_text(rt, fmt, brush, 8.0, 126.0, &format!("min  {min_t}"));
                 let _ = draw_text(rt, fmt, brush, 8.0, 144.0, &format!("avg  {avg_t}"));
                 let _ = draw_text(rt, fmt, brush, 8.0, 162.0, &format!("max  {max_t}"));

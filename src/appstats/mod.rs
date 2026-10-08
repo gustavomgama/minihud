@@ -4,12 +4,12 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// How often the HUD may recompute the top app. The HUD calls `top()`
-/// every frame (~50-115/s); without this cache each call locks the
-/// shared state and the ETW callback's `try_lock` starts dropping
-/// events — which shows up as flapping between the game and
-/// "-- (listening…)".
-const TOP_TTL: Duration = Duration::from_millis(500);
+/// How often the HUD may recompute the top app. 50ms keeps every
+/// shown number on the same cadence as the HW poller. The shared map
+/// is tiny and names/APIs are cached, so per-recompute lock holds are
+/// microseconds — the ETW callback's `try_lock` effectively never
+/// collides (watch `etw_dropped` in the log).
+const TOP_TTL: Duration = Duration::from_millis(50);
 
 /// One present-producing process, ranked by recent present rate.
 #[derive(Clone, Debug)]
@@ -18,9 +18,20 @@ pub struct AppFrame {
     pub name: String,
     pub fps: f32,
     pub avg_ms: f32,
+    /// Detected graphics API ("D3D12", "D3D11", "Vulkan", …), "--" if unknown.
+    pub api: String,
     /// Newest ≤120 frame intervals in ms, chronological. Feeds the HUD
     /// frametime graph so it shows the GAME, never the overlay itself.
     pub recent_ms: Vec<f32>,
+}
+
+/// Cached per-process identity: exe name + detected graphics API.
+/// Resolved once (single OpenProcess) and kept; dead pids prune with
+/// their event queues.
+#[derive(Clone, Debug, Default)]
+struct ProcInfo {
+    name: String,
+    api: Option<String>,
 }
 
 #[derive(Default)]
@@ -29,7 +40,7 @@ struct State {
     /// QPC ticks from the event header, NOT callback arrival time:
     /// real-time delivery batches events, so arrival times cluster.
     events: HashMap<u32, VecDeque<i64>>,
-    names: HashMap<u32, String>,
+    infos: HashMap<u32, ProcInfo>,
     /// ETW session failed (e.g. not elevated). Shown in HUD as placeholder.
     session_err: Option<String>,
     /// Newest event timestamp seen. Windows are relative to this
@@ -125,9 +136,9 @@ impl AppTracker {
     }
 
     /// True when `pid` is eligible: not us, and matching the filter.
-    /// Name matching resolves+caches the process name (cheap: cached).
+    /// Name matching resolves+caches process info (cheap: cached).
     fn eligible(
-        names: &mut HashMap<u32, String>,
+        infos: &mut HashMap<u32, ProcInfo>,
         pid: u32,
         exclude_pid: u32,
         filter: Option<&ProcessFilter>,
@@ -139,11 +150,11 @@ impl AppTracker {
             None => true,
             Some(ProcessFilter::Pid(p)) => pid == *p,
             Some(ProcessFilter::Name(q)) => {
-                if let Some(n) = names.get(&pid) {
-                    return n.to_lowercase().contains(q.as_str());
+                if let Some(info) = infos.get(&pid) {
+                    return info.name.to_lowercase().contains(q.as_str());
                 }
-                let n = Self::resolve_name(names, pid);
-                n.to_lowercase().contains(q.as_str())
+                let info = Self::resolve_info(infos, pid);
+                info.name.to_lowercase().contains(q.as_str())
             }
         }
     }
@@ -162,11 +173,11 @@ impl AppTracker {
         let win_from = mark - qpc_freq();
         let mut best: Option<(u32, usize)> = None;
         // Prune + rank. Single pass; map is tiny (one entry per presenter).
-        // Reborrow through the guard once so `events`/`names` are
+        // Reborrow through the guard once so `events`/`infos` are
         // disjoint field borrows (two direct `&mut st.x` borrows alias
         // through DerefMut and won't compile).
         let st_ref: &mut State = &mut st;
-        let (events, names) = (&mut st_ref.events, &mut st_ref.names);
+        let (events, infos) = (&mut st_ref.events, &mut st_ref.infos);
         let pids: Vec<u32> = events.keys().copied().collect();
         for pid in pids {
             let empty = match events.get_mut(&pid) {
@@ -182,7 +193,7 @@ impl AppTracker {
                 events.remove(&pid);
                 continue;
             }
-            if !Self::eligible(names, pid, exclude_pid, filter) {
+            if !Self::eligible(infos, pid, exclude_pid, filter) {
                 continue;
             }
             let n = events
@@ -211,7 +222,7 @@ impl AppTracker {
                     // 0 means over a second of silence, which reads
                     // honestly as no-presents, not "0fps".
                     Some(p)
-                        if Self::eligible(&mut st.names, p, exclude_pid, filter)
+                        if Self::eligible(&mut st.infos, p, exclude_pid, filter)
                             && st.events.get(&p).is_some_and(|q| {
                                 q.iter().filter(|t| **t >= win_from).count() >= 1
                             }) =>
@@ -255,24 +266,25 @@ impl AppTracker {
             recent_ms.drain(..recent_ms.len() - 120);
         }
         let avg_ms = if gaps > 0 { sum / gaps as f64 } else { 0.0 } as f32;
-        let name = st
-            .names
+        let info = st
+            .infos
             .get(&pid)
             .cloned()
-            .unwrap_or_else(|| Self::resolve_name(&mut st.names, pid));
+            .unwrap_or_else(|| Self::resolve_info(&mut st.infos, pid));
         Some(AppFrame {
             pid,
-            name,
+            name: info.name,
+            api: info.api.unwrap_or_else(|| "--".to_string()),
             fps: n as f32,
             avg_ms,
             recent_ms,
         })
     }
 
-    /// Top presenters in the last second as (name, pid, count), up to 4,
-    /// including ourselves. For logs only: settles "who is actually
-    /// presenting" arguments that the single APP row can't.
-    pub fn snapshot(&self) -> Vec<(String, u32, usize)> {
+    /// Top presenters in the last second as (name, pid, count, api), up
+    /// to 4. For logs only: settles "who is actually presenting" and
+    /// "which API did we detect" arguments the APP row can't.
+    pub fn snapshot(&self) -> Vec<(String, u32, usize, String)> {
         let mut st = match self.state.lock() {
             Ok(g) => g,
             Err(_) => return Vec::new(),
@@ -282,7 +294,7 @@ impl AppTracker {
             return Vec::new();
         }
         let win_from = mark - qpc_freq();
-        let mut rows: Vec<(String, u32, usize)> = Vec::new();
+        let mut rows: Vec<(String, u32, usize, String)> = Vec::new();
         let pids: Vec<u32> = st.events.keys().copied().collect();
         for pid in pids {
             let n = st
@@ -293,12 +305,21 @@ impl AppTracker {
             if n == 0 {
                 continue;
             }
-            let name = st.names.get(&pid).cloned().unwrap_or_else(|| {
-                let n = process_name(pid).unwrap_or_else(|| format!("pid {pid}"));
-                st.names.insert(pid, n.clone());
-                n
+            let info = st.infos.get(&pid).cloned().unwrap_or_else(|| {
+                let info = process_info(pid).unwrap_or_else(|| ProcInfo {
+                    name: format!("pid {pid}"),
+                    ..Default::default()
+                });
+                let out = info.clone();
+                st.infos.insert(pid, info);
+                out
             });
-            rows.push((name, pid, n));
+            rows.push((
+                info.name,
+                pid,
+                n,
+                info.api.unwrap_or_else(|| "?".to_string()),
+            ));
         }
         rows.sort_by(|a, b| b.2.cmp(&a.2));
         rows.truncate(4);
@@ -318,39 +339,104 @@ impl AppTracker {
         }
     }
 
-    fn resolve_name(names: &mut HashMap<u32, String>, pid: u32) -> String {
-        let name = process_name(pid).unwrap_or_else(|| format!("pid {pid}"));
-        names.insert(pid, name.clone());
-        // Drop cached names for dead processes so the map stays tiny.
-        if names.len() > 64 {
-            names.retain(|_, _| false);
-            names.insert(pid, name.clone());
+    fn resolve_info(infos: &mut HashMap<u32, ProcInfo>, pid: u32) -> ProcInfo {
+        let info = process_info(pid).unwrap_or_else(|| ProcInfo {
+            name: format!("pid {pid}"),
+            ..Default::default()
+        });
+        infos.insert(pid, info.clone());
+        // Drop cached infos for dead processes so the map stays tiny.
+        if infos.len() > 64 {
+            infos.retain(|_, _| false);
+            infos.insert(pid, info.clone());
         }
-        name
+        info
     }
 }
 
-fn process_name(pid: u32) -> Option<String> {
-    use windows::Win32::Foundation::CloseHandle;
+/// Open a process once and read both its exe name and its graphics API
+/// (from loaded runtime dlls). Full access for the module list, limited
+/// fallback for the name alone.
+fn process_info(pid: u32) -> Option<ProcInfo> {
+    use windows::Win32::Foundation::{CloseHandle, HMODULE};
+    use windows::Win32::System::ProcessStatus::{EnumProcessModules, GetModuleBaseNameW};
     use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-        PROCESS_QUERY_LIMITED_INFORMATION,
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_INFORMATION,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
     };
     unsafe {
+        // Try full access first (name + modules in one handle).
+        if let Ok(h) = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid) {
+            let name = image_name(h).unwrap_or_else(|| format!("pid {pid}"));
+            let api = detect_api(h);
+            let _ = CloseHandle(h);
+            return Some(ProcInfo { name, api });
+        }
+        // Protected process (anti-cheat blocks full access): name only.
+        // API stays unknown ("--") rather than guessed.
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        tracing::debug!("appstats: full handle denied for pid {pid}; api unknown");
+        let name = image_name(h).unwrap_or_else(|| format!("pid {pid}"));
+        let _ = CloseHandle(h);
+        Some(ProcInfo { name, api: None })
+    }
+}
+
+/// Highest loaded runtime wins: D3D12 > Vulkan > D3D11 > D3D9 > OpenGL.
+/// dxgi.dll alone says nothing (it loads for all D3D10+), hence this.
+fn detect_api(hprocess: windows::Win32::Foundation::HANDLE) -> Option<String> {
+    use windows::Win32::Foundation::HMODULE;
+    use windows::Win32::System::ProcessStatus::{EnumProcessModules, GetModuleBaseNameW};
+    // (dll substring, label) in preference order.
+    const RUNTIMES: &[(&str, &str)] = &[
+        ("d3d12.dll", "D3D12"),
+        ("vulkan-1.dll", "Vulkan"),
+        ("d3d11.dll", "D3D11"),
+        ("d3d9.dll", "D3D9"),
+        ("opengl32.dll", "OpenGL"),
+    ];
+    unsafe {
+        let mut mods = [HMODULE::default(); 128];
+        let mut needed = 0u32;
+        if EnumProcessModules(
+            hprocess,
+            mods.as_mut_ptr(),
+            (mods.len() * std::mem::size_of::<HMODULE>()) as u32,
+            &mut needed,
+        )
+        .is_err()
+        {
+            return None;
+        }
+        let count = (needed as usize / std::mem::size_of::<HMODULE>()).min(mods.len());
+        let mut loaded: Vec<String> = Vec::with_capacity(count);
+        for m in mods.iter().take(count) {
+            let mut buf = [0u16; 64];
+            if GetModuleBaseNameW(hprocess, Some(*m), &mut buf) > 0 {
+                loaded.push(String::from_utf16_lossy(&buf).to_lowercase());
+            }
+        }
+        for (dll, label) in RUNTIMES {
+            if loaded.iter().any(|m| m.contains(dll)) {
+                return Some(label.to_string());
+            }
+        }
+        None
+    }
+}
+
+fn image_name(hprocess: windows::Win32::Foundation::HANDLE) -> Option<String> {
+    use windows::Win32::System::Threading::{QueryFullProcessImageNameW, PROCESS_NAME_WIN32};
+    unsafe {
         let mut buf = [0u16; 512];
         let mut len = buf.len() as u32;
-        let ok = QueryFullProcessImageNameW(
-            h,
+        QueryFullProcessImageNameW(
+            hprocess,
             PROCESS_NAME_WIN32,
             windows::core::PWSTR(buf.as_mut_ptr()),
             &mut len,
         )
-        .is_ok();
-        let _ = CloseHandle(h);
-        if !ok {
-            return None;
-        }
+        .ok()?;
         let full = String::from_utf16_lossy(&buf[..len as usize]);
         Some(full.rsplit(['\\', '/']).next().unwrap_or(&full).to_string())
     }
