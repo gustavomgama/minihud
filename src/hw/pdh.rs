@@ -67,30 +67,60 @@ impl PdhCounter {
 
 pub struct HwPoller {
     last: Instant,
-    interval: Duration,
+    active: Duration,
+    idle: Duration,
+    next: Duration,
+    stable_polls: u8,
     cpu: Option<PdhCounter>,
     gpu: Option<PdhCounter>,
     cached: HwStats,
+    prev: Option<HwStats>,
     warmup: u8,
 }
 
 impl HwPoller {
-    pub fn new(interval_ms: u64) -> Self {
+    pub fn new(active_ms: u64, idle_ms: u64) -> Self {
         let cpu = PdhCounter::open("\\Processor(_Total)\\% Processor Time");
         // Best-effort: present on Win10+ with GPU scheduler; absent on some configs.
         let gpu = PdhCounter::open("\\GPU Engine(*)\\Utilization Percentage");
+        let active = Duration::from_millis(active_ms.max(1));
         Self {
-            last: Instant::now() - Duration::from_millis(interval_ms),
-            interval: Duration::from_millis(interval_ms),
+            last: Instant::now() - active,
+            next: active,
+            stable_polls: 0,
+            active,
+            idle: Duration::from_millis(idle_ms.max(active_ms.max(1))),
             cpu,
             gpu,
             cached: HwStats::default(),
+            prev: None,
             warmup: 0,
         }
     }
 
+    /// True when the latest poll moved anything beyond idle noise.
+    /// Epsilons sit above quiescent jitter (0-2% CPU wander, MHz
+    /// hunting) so a quiet desktop backs off instead of pinning fast.
+    fn changed_since_last(&self) -> bool {
+        let (Some(p), c) = (self.prev.as_ref(), &self.cached) else {
+            return true;
+        };
+        (c.cpu_percent - p.cpu_percent).abs() > 2.0
+            || c.ram_used_mb.abs_diff(p.ram_used_mb) > 32
+            || opt_changed(c.gpu_percent, p.gpu_percent, 2.0)
+            || opt_changed(c.gpu_temp_c, p.gpu_temp_c, 0.5)
+            || opt_changed(c.gpu_power_w, p.gpu_power_w, 1.0)
+            || c.gpu_core_mhz != p.gpu_core_mhz
+            || c.gpu_mem_mhz != p.gpu_mem_mhz
+            || mhz_changed(c.cpu_mhz, p.cpu_mhz)
+            || c.gpu_vram_used_mb.abs_diff(p.gpu_vram_used_mb) > 32
+    }
+
+    /// Poll when due. Adaptive cadence: anything changing beyond noise
+    /// resets to the active rate; 4 quiet polls in a row double the
+    /// interval up to the idle cap. Idle desktop costs ~nothing.
     pub fn update(&mut self) -> Option<HwStats> {
-        if self.last.elapsed() < self.interval {
+        if self.last.elapsed() < self.next {
             return None;
         }
         self.last = Instant::now();
@@ -134,11 +164,44 @@ impl HwPoller {
                 self.cached.gpu_vram_total_mb = vt;
             }
         }
+        // Adapt the NEXT interval to how much just moved.
+        if self.changed_since_last() {
+            self.next = self.active;
+            self.stable_polls = 0;
+        } else {
+            self.stable_polls = self.stable_polls.saturating_add(1);
+            if self.stable_polls >= 4 {
+                self.next = (self.next * 2).min(self.idle);
+                self.stable_polls = 0;
+            }
+        }
+        self.prev = Some(self.cached.clone());
         Some(self.cached.clone())
     }
 
     pub fn cached(&self) -> &HwStats {
         &self.cached
+    }
+
+    /// Current poll interval (for logs): active when moving, up to idle.
+    pub fn interval_ms(&self) -> u64 {
+        self.next.as_millis() as u64
+    }
+}
+
+fn opt_changed(a: Option<f32>, b: Option<f32>, eps: f32) -> bool {
+    match (a, b) {
+        (Some(x), Some(y)) => (x - y).abs() > eps,
+        (None, None) => false,
+        _ => true,
+    }
+}
+
+fn mhz_changed(a: Option<u32>, b: Option<u32>) -> bool {
+    match (a, b) {
+        (Some(x), Some(y)) => x.abs_diff(y) > 100,
+        (None, None) => false,
+        _ => true,
     }
 }
 
