@@ -165,8 +165,6 @@ fn main() -> Result<()> {
             // 0 cpu%, 1 cputemp, 2 cpupower, 3 ram, 4 gpu%, 5 gputemp,
             // 6 gpupower, 7 core, 8 mem, 9 vram.
             let vals: Vec<String> = vec![
-                format!("GPU: NVIDIA GeForce RTX 4090"),
-                format!("CPU: AMD Ryzen 9 5900X"),
                 show(format!("{:3.0} %", stats.cpu_percent.max(0.0))),
                 show(opt_f32(stats.cpu_temp_c, "°C", 0)),
                 show(opt_f32(stats.cpu_power_w, "W", 0)),
