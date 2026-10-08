@@ -19,8 +19,8 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
     let cfg = Config::load();
     tracing::info!("config at {:?}: {:?}", Config::path(), cfg);
-    let win_h = if cfg.show_frametime_graph { 120 } else { 64 };
-    let overlay = Overlay::new("minihud", cfg.x, cfg.y, 460, win_h, cfg.text_size)?;
+    let win_h = if cfg.show_frametime_graph { 132 } else { 76 };
+    let overlay = Overlay::new("minihud", cfg.x, cfg.y, 500, win_h, cfg.text_size)?;
     tracing::info!("overlay hwnd: {:?}", overlay.hwnd);
     overlay.set_click_through(cfg.click_through);
     tracing::info!("hotkeys: F7 toggle, F8 click-through (polled)");
@@ -112,8 +112,10 @@ fn main() -> Result<()> {
                     }
                 };
                 let s = timer.stats();
+                // Section tags + units on every value: HUD = this overlay's
+                // refresh, SYS = machine, GPU = graphics adapter.
                 let line1 = format!(
-                    "FPS: {:3.0} | ms: {:5.2} | min: {:5.2} | max: {:5.2}",
+                    "HUD  FPS {:3.0} | FRAME {:5.2} ms avg (min {:5.2} / max {:5.2})",
                     s.fps, s.avg_ms, s.min_ms, s.max_ms
                 );
                 let gpu_txt = match stats.gpu_percent {
@@ -121,22 +123,32 @@ fn main() -> Result<()> {
                     None => "--".to_string(),
                 };
                 let line2 = format!(
-                    "CPU: {:3.0}% | RAM: {}/{}MB | GPU: {} | VRAM: {}/{}MB",
+                    "SYS  CPU {:3.0}% | RAM {}",
                     stats.cpu_percent,
-                    stats.ram_used_mb,
-                    stats.ram_total_mb,
-                    gpu_txt,
-                    stats.gpu_vram_used_mb,
-                    stats.gpu_vram_total_mb,
+                    mem_txt(stats.ram_used_mb, stats.ram_total_mb),
+                );
+                let line3 = format!(
+                    "GPU  {gpu_txt} | VRAM {}",
+                    mem_txt(stats.gpu_vram_used_mb, stats.gpu_vram_total_mb),
                 );
                 let _ = draw_text(rt, fmt, brush, 8.0, 4.0, &line1);
                 let _ = draw_text(rt, fmt, brush, 8.0, 22.0, &line2);
+                let _ = draw_text(rt, fmt, brush, 8.0, 40.0, &line3);
                 if cfg.show_frametime_graph {
-                    let _ = draw_graph(rt, brush, timer.samples_ms(), 8.0, 44.0, 420.0, 60.0);
+                    let _ = draw_graph(rt, brush, timer.samples_ms(), 8.0, 62.0, 460.0, 56.0);
                 }
             }
             let _ = overlay.end_draw();
         }
         std::thread::sleep(std::time::Duration::from_millis(8));
+    }
+}
+
+/// "12.1/31.9 GB" or "512/1024 MB" — GB when the total is 2+ GB.
+fn mem_txt(used_mb: u64, total_mb: u64) -> String {
+    if total_mb >= 2048 {
+        format!("{:.1}/{:.1} GB", used_mb as f64 / 1024.0, total_mb as f64 / 1024.0)
+    } else {
+        format!("{used_mb}/{total_mb} MB")
     }
 }
