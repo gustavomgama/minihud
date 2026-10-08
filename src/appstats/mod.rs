@@ -56,6 +56,32 @@ fn qpc_now() -> i64 {
     t
 }
 
+/// CLI process target: `--process Overwatch.exe` or `--process 1234`.
+/// Name matches case-insensitively by substring ("overwatch" hits
+/// "Overwatch.exe"); a pure number matches the PID exactly.
+#[derive(Clone, Debug)]
+pub enum ProcessFilter {
+    Pid(u32),
+    Name(String),
+}
+
+impl ProcessFilter {
+    pub fn parse(arg: &str) -> Self {
+        match arg.parse::<u32>() {
+            Ok(pid) => Self::Pid(pid),
+            Err(_) => Self::Name(arg.to_lowercase()),
+        }
+    }
+
+    /// Short label for HUD placeholders ("Overwatch.exe" / "pid 1234").
+    pub fn label(&self) -> String {
+        match self {
+            Self::Pid(pid) => format!("pid {pid}"),
+            Self::Name(n) => n.clone(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppTracker {
     state: Arc<Mutex<State>>,
@@ -83,22 +109,47 @@ impl AppTracker {
 
     /// Highest-rate present producer excluding `exclude_pid` (our own HUD).
     /// Needs >= 2 presents in the last second; prunes data older than 2s.
+    /// With a filter, only the targeted process is considered.
     /// Result is cached for 500ms so per-frame HUD reads don't contend
     /// with the ETW delivery thread.
-    pub fn top(&self, exclude_pid: u32) -> Option<AppFrame> {
+    pub fn top(&self, exclude_pid: u32, filter: Option<&ProcessFilter>) -> Option<AppFrame> {
         if let Ok(cache) = self.cache.lock() {
             if cache.0.elapsed() < TOP_TTL {
                 return cache.1.clone();
             }
         }
-        let fresh = self.compute_top(exclude_pid);
+        let fresh = self.compute_top(exclude_pid, filter);
         if let Ok(mut cache) = self.cache.lock() {
             *cache = (Instant::now(), fresh.clone());
         }
         fresh
     }
 
-    fn compute_top(&self, exclude_pid: u32) -> Option<AppFrame> {
+    /// True when `pid` is eligible: not us, and matching the filter.
+    /// Name matching resolves+caches the process name (cheap: cached).
+    fn eligible(
+        names: &mut HashMap<u32, String>,
+        pid: u32,
+        exclude_pid: u32,
+        filter: Option<&ProcessFilter>,
+    ) -> bool {
+        if pid == exclude_pid {
+            return false;
+        }
+        match filter {
+            None => true,
+            Some(ProcessFilter::Pid(p)) => pid == *p,
+            Some(ProcessFilter::Name(q)) => {
+                if let Some(n) = names.get(&pid) {
+                    return n.to_lowercase().contains(q.as_str());
+                }
+                let n = Self::resolve_name(names, pid);
+                n.to_lowercase().contains(q.as_str())
+            }
+        }
+    }
+
+    fn compute_top(&self, exclude_pid: u32, filter: Option<&ProcessFilter>) -> Option<AppFrame> {
         let mut st = self.state.lock().ok()?;
         let freq = qpc_freq() as f64;
         let now = qpc_now();
@@ -106,23 +157,33 @@ impl AppTracker {
         let win_from = now - qpc_freq();
         let mut best: Option<(u32, usize)> = None;
         // Prune + rank. Single pass; map is tiny (one entry per presenter).
-        let pids: Vec<u32> = st.events.keys().copied().collect();
+        // Reborrow through the guard once so `events`/`names` are
+        // disjoint field borrows (two direct `&mut st.x` borrows alias
+        // through DerefMut and won't compile).
+        let st_ref: &mut State = &mut st;
+        let (events, names) = (&mut st_ref.events, &mut st_ref.names);
+        let pids: Vec<u32> = events.keys().copied().collect();
         for pid in pids {
-            let q = match st.events.get_mut(&pid) {
-                Some(q) => q,
+            let empty = match events.get_mut(&pid) {
+                Some(q) => {
+                    while q.front().is_some_and(|t| *t < keep_from) {
+                        q.pop_front();
+                    }
+                    q.is_empty()
+                }
                 None => continue,
             };
-            while q.front().is_some_and(|t| *t < keep_from) {
-                q.pop_front();
-            }
-            if q.is_empty() {
-                st.events.remove(&pid);
+            if empty {
+                events.remove(&pid);
                 continue;
             }
-            if pid == exclude_pid {
+            if !Self::eligible(names, pid, exclude_pid, filter) {
                 continue;
             }
-            let n = q.iter().filter(|t| **t >= win_from).count();
+            let n = events
+                .get(&pid)
+                .map(|q| q.iter().filter(|t| **t >= win_from).count())
+                .unwrap_or(0);
             if n >= 2 && best.is_none_or(|(_, bn)| n > bn) {
                 best = Some((pid, n));
             }
@@ -140,11 +201,12 @@ impl AppTracker {
             None => {
                 let inc = self.incumbent.lock().ok().and_then(|g| *g);
                 match inc {
-                    // Incumbent needs >= 1 present in the 1s window to
-                    // stay displayed; 0 means over a second of silence,
-                    // which reads honestly as listening, not "0fps".
+                    // Incumbent needs >= 1 present in the 1s window (and
+                    // must still match the filter) to stay displayed;
+                    // 0 means over a second of silence, which reads
+                    // honestly as no-presents, not "0fps".
                     Some(p)
-                        if p != exclude_pid
+                        if Self::eligible(&mut st.names, p, exclude_pid, filter)
                             && st.events.get(&p).is_some_and(|q| {
                                 q.iter().filter(|t| **t >= win_from).count() >= 1
                             }) =>
@@ -195,9 +257,14 @@ impl AppTracker {
     }
 
     /// Placeholder line when no app data yet: "APP  -- (run as admin)" etc.
-    pub fn status_text(&self) -> String {
-        match self.state.lock().ok().and_then(|st| st.session_err.clone()) {
-            Some(e) => format!("APP  -- ({e})"),
+    /// With a process filter the placeholder names the target so a silent
+    /// game is distinguishable from a dead session.
+    pub fn status_text(&self, filter: Option<&ProcessFilter>) -> String {
+        if let Some(err) = self.state.lock().ok().and_then(|st| st.session_err.clone()) {
+            return format!("APP  -- ({err})");
+        }
+        match filter {
+            Some(f) => format!("APP  {} -- (no presents)", f.label()),
             None => "APP  -- (listening…)".to_string(),
         }
     }

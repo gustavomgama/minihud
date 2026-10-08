@@ -20,8 +20,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
+    let args = parse_args();
     let cfg = Config::load();
     tracing::info!("config at {:?}: {:?}", Config::path(), cfg);
+    if let Some(f) = &args.process {
+        tracing::info!("process filter: {}", f.label());
+    }
     let win_h = if cfg.show_frametime_graph { 150 } else { 96 };
     let overlay = Overlay::new("minihud", cfg.x, cfg.y, 500, win_h, cfg.text_size)?;
     tracing::info!("overlay hwnd: {:?}", overlay.hwnd);
@@ -85,9 +89,9 @@ fn main() -> Result<()> {
         f8_down = f8_now;
         if frames % 300 == 1 {
             let s = timer.stats();
-            let app_txt = match apps.top(self_pid) {
+            let app_txt = match apps.top(self_pid, args.process.as_ref()) {
                 Some(a) => format!("{} {:.0}fps {:.2}ms", a.name, a.fps, a.avg_ms),
-                None => apps.status_text(),
+                None => apps.status_text(args.process.as_ref()),
             };
             let (etw_start, etw_stop) = appstats::etw::seen();
             tracing::info!(
@@ -134,12 +138,12 @@ fn main() -> Result<()> {
                     Some(g) => format!("{g:3.0}%"),
                     None => "--".to_string(),
                 };
-                let line2 = match apps.top(self_pid) {
+                let line2 = match apps.top(self_pid, args.process.as_ref()) {
                     Some(a) => format!(
                         "APP  {} {:3.0} FPS | {:5.2} ms avg",
                         a.name, a.fps, a.avg_ms
                     ),
-                    None => apps.status_text(),
+                    None => apps.status_text(args.process.as_ref()),
                 };
                 let line3 = format!(
                     "SYS  CPU {:3.0}% | RAM {}",
@@ -175,4 +179,45 @@ fn mem_txt(used_mb: u64, total_mb: u64) -> String {
     } else {
         format!("{used_mb}/{total_mb} MB")
     }
+}
+
+/// Minimal CLI: `--process NAME|PID` pins the APP row to one process,
+/// `--help` prints usage. No arg library on purpose (one flag).
+struct Args {
+    process: Option<appstats::ProcessFilter>,
+}
+
+fn parse_args() -> Args {
+    use appstats::ProcessFilter;
+    let mut it = std::env::args().skip(1);
+    let mut process = None;
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--help" | "-h" => {
+                println!("minihud — minimal Windows performance overlay");
+                println!();
+                println!("Usage: minihud.exe [--process NAME|PID]");
+                println!();
+                println!("  --process NAME   track only processes whose exe name");
+                println!("                   contains NAME (case-insensitive),");
+                println!("                   e.g. --process Overwatch.exe");
+                println!("  --process PID    track only that process id");
+                println!();
+                println!("Keys: F7 show/hide, F8 click-through on/off.");
+                std::process::exit(0);
+            }
+            "--process" => match it.next() {
+                Some(v) => process = Some(ProcessFilter::parse(&v)),
+                None => {
+                    eprintln!("minihud: --process needs a NAME or PID");
+                    std::process::exit(2);
+                }
+            },
+            other => {
+                eprintln!("minihud: unknown arg {other:?} (try --help)");
+                std::process::exit(2);
+            }
+        }
+    }
+    Args { process }
 }
