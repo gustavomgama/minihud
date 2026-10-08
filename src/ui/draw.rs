@@ -50,6 +50,25 @@ pub fn draw_text(
     Ok(())
 }
 
+/// 1px horizontal rule (graph thresholds, section dividers).
+pub fn draw_hline(
+    rt: &ID2D1HwndRenderTarget,
+    brush: &ID2D1SolidColorBrush,
+    x0: f32,
+    x1: f32,
+    y: f32,
+) -> Result<()> {
+    unsafe {
+        rt.DrawLine(
+            Vector2 { X: x0, Y: y },
+            Vector2 { X: x1, Y: y },
+            brush,
+            1.0,
+            None,
+        );
+    }
+    Ok(())
+}
 /// Frametime graph on a FIXED 0–`max_ms` scale. Autoscaling to the data
 /// makes steady frame rates look spiky (any jitter fills the height);
 /// a fixed ceiling keeps flat rates flat and reserves the top for real

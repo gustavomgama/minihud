@@ -5,9 +5,13 @@ Rust + `windows-rs` + Direct2D. No UI framework.
 
 ## Shows (RTSS-style vertical stack, "--" when silent)
 
-- App name + big FPS, game frametime graph (fixed 50ms ceiling, flat at
-  steady rates), detected graphics API (D3D12/D3D11/Vulkan/D3D9/OpenGL
-  from loaded runtime dlls; `--` when the process blocks inspection)
+- App name + big FPS (tinted: green ≥120, amber ≥60, red below;
+  digits always accompany color), game frametime graph (fixed 50ms
+  ceiling so steady rates read flat, 16.7ms target line), detected
+  graphics API (D3D12/D3D11/Vulkan/D3D9/OpenGL from loaded runtime
+  dlls; `--` when the process blocks inspection)
+- Two-tier text (dim labels, bright values); displayed numbers ease
+  toward raw values (~150ms settle), data itself never smoothed
 - min / avg / max / 1% low frametime, game Hz + display Hz
 - CPU: load %, avg clock MHz (via CallNtPowerInformation), RAM used/total
 - GPU: load %, temp °C, power W, core/mem clocks (via NVML on NVIDIA;

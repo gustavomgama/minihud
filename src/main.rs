@@ -9,7 +9,7 @@ use appstats::AppTracker;
 use config::Config;
 use hw::HwPoller;
 use timing::PresentTimer;
-use ui::{draw_graph, draw_text, TextBrush};
+use ui::{draw_graph, draw_hline, draw_text, TextBrush};
 use win::overlay::Overlay;
 use windows::core::Result;
 use windows::Win32::System::Threading::GetCurrentProcessId;
@@ -27,7 +27,7 @@ fn main() -> Result<()> {
     if let Some(f) = &args.process {
         tracing::info!("process filter: {}", f.label());
     }
-    let win_h = 436; // fixed: stable rows, no resize flicker
+    let win_h = 450; // fixed: stable rows, no resize flicker
     let mut overlay = Overlay::new("minihud", cfg.x, cfg.y, 500, win_h, cfg.text_size)?;
     tracing::info!("overlay hwnd: {:?}", overlay.hwnd);
     overlay.set_click_through(cfg.click_through);
@@ -49,12 +49,36 @@ fn main() -> Result<()> {
     // Text alpha follows cfg.opacity (window itself is opaque for now).
     // Dropped + rebuilt if the D2D device is lost (see end_draw below).
     let text_alpha = cfg.opacity.clamp(0.2, 1.0);
-    let mut white_brush = overlay
-        .rt()
-        .and_then(|rt| TextBrush::new(rt, 1.0, 1.0, 1.0, text_alpha).ok());
-    if white_brush.is_none() {
+    // Brush set, built once and rebuilt after device loss. Tiers:
+    // values near-white, labels dim slate, big FPS tinted by threshold
+    // (numbers always accompany color: never color-only meaning).
+    struct Brushes {
+        values: TextBrush,
+        labels: TextBrush,
+        good: TextBrush,
+        warn: TextBrush,
+        bad: TextBrush,
+    }
+    fn make_brushes(overlay: &Overlay, text_alpha: f32) -> Option<Brushes> {
+        let rt = overlay.rt()?;
+        Some(Brushes {
+            values: TextBrush::new(rt, 1.0, 1.0, 1.0, text_alpha).ok()?,
+            labels: TextBrush::new(rt, 0.60, 0.64, 0.72, text_alpha).ok()?,
+            good: TextBrush::new(rt, 0.35, 0.87, 0.55, text_alpha).ok()?,
+            warn: TextBrush::new(rt, 1.0, 0.75, 0.25, text_alpha).ok()?,
+            bad: TextBrush::new(rt, 1.0, 0.42, 0.40, text_alpha).ok()?,
+        })
+    }
+    let mut brushes = make_brushes(&overlay, text_alpha);
+    if brushes.is_none() {
         tracing::warn!("no render target; overlay will be empty");
     }
+    // Displayed (smoothed) readouts. The DATA stays raw; only presentation
+    // lerps toward it (~150ms settle), so digits stop flickering without
+    // hiding real changes. -1.0 = unset, snap on first frame.
+    let mut disp_app_fps = -1.0f32;
+    let mut disp_cpu = -1.0f32;
+    let mut disp_gpu = -1.0f32;
     // Last device-recovery attempt (throttled: retry every 2s, not per frame).
     let mut last_recover: Option<std::time::Instant> = None;
     // 'run: the WM_QUIT arm below sits inside the message-pump `while`,
@@ -152,28 +176,50 @@ fn main() -> Result<()> {
             if let (Some(rt), Some(fmt), Some(big)) =
                 (overlay.rt(), overlay.fmt(), overlay.fmt_big())
             {
-                let brush_opt = white_brush.as_ref().map(|b| &b.brush);
-                // Fall back to a per-frame brush if the cached one failed.
-                let _fallback;
-                let brush = match brush_opt {
+                let brush_opt = brushes.as_ref();
+                // No brushes (device lost, recovery pending): skip drawing;
+                // the last frame stays up and the recovery block rebuilds.
+                let b = match brush_opt {
                     Some(b) => b,
                     None => {
-                        _fallback = TextBrush::new(rt, 1.0, 1.0, 1.0, 1.0).ok();
-                        match _fallback.as_ref() {
-                            Some(b) => &b.brush,
-                            None => {
-                                let _ = overlay.end_draw();
-                                std::thread::sleep(std::time::Duration::from_millis(8));
-                                continue;
-                            }
-                        }
+                        let _ = overlay.end_draw();
+                        std::thread::sleep(std::time::Duration::from_millis(8));
+                        continue;
                     }
                 };
-                // RTSS-style vertical stack. "--" wherever the game is
-                // silent; layout never shifts. No overlay-own stats on
-                // screen by design (temps/clocks/watts need vendor APIs
-                // and are omitted until then, not faked).
+                let bv = &b.values.brush;
+                let bl = &b.labels.brush;
+                // RTSS-style vertical stack, label|value columns. "--"
+                // wherever the game is silent; layout never shifts. No
+                // overlay-own stats on screen by design (temps/clocks need
+                // vendor APIs and are omitted until then, not faked).
                 let app = apps.top(self_pid, args.process.as_ref());
+                // Displayed readouts lerp toward raw data (~150ms settle):
+                // calm digits, same truth. Snap on first sight.
+                let app_fps_raw = app.as_ref().map(|a| a.fps).unwrap_or(-1.0);
+                if app_fps_raw < 0.0 {
+                    disp_app_fps = -1.0;
+                }
+                let app_fps = smooth(&mut disp_app_fps, app_fps_raw.max(0.0));
+                let cpu_txt = smooth(&mut disp_cpu, stats.cpu_percent.max(0.0));
+                let gpu_raw = stats.gpu_percent.unwrap_or(-1.0);
+                let gpu_txt = if gpu_raw < 0.0 {
+                    disp_gpu = -1.0;
+                    "--".to_string()
+                } else {
+                    format!("{:3.0} %", smooth(&mut disp_gpu, gpu_raw))
+                };
+                // Threshold tint on the headline number only; every value
+                // keeps its digits (never color-only meaning).
+                let tint = if app.is_none() {
+                    bv
+                } else if app_fps >= 120.0 {
+                    &b.good.brush
+                } else if app_fps >= 60.0 {
+                    &b.warn.brush
+                } else {
+                    &b.bad.brush
+                };
                 let (app_name, fps_txt, min_t, avg_t, max_t, low_t, hz_game) = match &app {
                     Some(a) => {
                         let iv = &a.recent_ms;
@@ -181,7 +227,7 @@ fn main() -> Result<()> {
                         let max = iv.iter().cloned().fold(0.0f32, f32::max);
                         (
                             a.name.clone(),
-                            format!("{:3.0} FPS", a.fps),
+                            format!("{app_fps:3.0} FPS"),
                             fmt_ms(min),
                             format!("{:5.2} ms", a.avg_ms),
                             fmt_ms(max),
@@ -189,7 +235,7 @@ fn main() -> Result<()> {
                                 Some(f) => format!("{f:3.0} FPS"),
                                 None => "--".to_string(),
                             },
-                            format!("{:3.0} Hz", a.fps),
+                            format!("{app_fps:3.0} Hz"),
                         )
                     }
                     None => (
@@ -202,92 +248,54 @@ fn main() -> Result<()> {
                         "--".to_string(),
                     ),
                 };
-                let gpu_txt = match stats.gpu_percent {
-                    Some(g) => format!("{g:3.0}%"),
-                    None => "--".to_string(),
+                // Two-column row: dim label at x=8, bright value at x=104.
+                let row = |y: f32, label: &str, value: &str| {
+                    let _ = draw_text(rt, fmt, bl, 8.0, y, label);
+                    let _ = draw_text(rt, fmt, bv, 104.0, y, value);
                 };
-                let _ = draw_text(rt, fmt, brush, 8.0, 4.0, &app_name);
-                let _ = draw_text(rt, big, brush, 8.0, 20.0, &fps_txt);
+                let _ = draw_text(rt, fmt, bv, 8.0, 4.0, &app_name);
+                let _ = draw_text(rt, big, tint, 8.0, 20.0, &fps_txt);
                 if cfg.show_frametime_graph {
                     if let Some(a) = &app {
                         // Fixed 50ms ceiling: steady rates render flat.
-                        let _ = draw_graph(rt, brush, &a.recent_ms, 150.0, 8.0, 300.0, 44.0, 50.0);
+                        let _ = draw_graph(rt, bv, &a.recent_ms, 150.0, 8.0, 300.0, 44.0, 50.0);
+                        // 16.7ms = 60fps target line.
+                        let _ = draw_hline(rt, bl, 150.0, 450.0, 37.3);
                     }
                 }
-                let api_txt = match &app {
-                    Some(a) => format!("API  {}", a.api),
-                    None => "API  --".to_string(),
-                };
-                let _ = draw_text(rt, fmt, brush, 8.0, 108.0, &api_txt);
-                let _ = draw_text(rt, fmt, brush, 8.0, 126.0, &format!("min  {min_t}"));
-                let _ = draw_text(rt, fmt, brush, 8.0, 144.0, &format!("avg  {avg_t}"));
-                let _ = draw_text(rt, fmt, brush, 8.0, 162.0, &format!("max  {max_t}"));
-                let _ = draw_text(rt, fmt, brush, 8.0, 180.0, &format!("1%   {low_t}"));
-                let _ = draw_text(rt, fmt, brush, 8.0, 198.0, "CPU:");
-                let _ = draw_text(
-                    rt,
-                    fmt,
-                    brush,
-                    8.0,
-                    216.0,
-                    &format!("{:3.0} %", stats.cpu_percent),
+                row(
+                    108.0,
+                    "API",
+                    &match &app {
+                        Some(a) => a.api.clone(),
+                        None => "--".to_string(),
+                    },
                 );
-                let _ = draw_text(rt, fmt, brush, 8.0, 230.0, &opt_u32(stats.cpu_mhz, "MHz"));
-                let _ = draw_text(
-                    rt,
-                    fmt,
-                    brush,
-                    8.0,
-                    248.0,
-                    &format!("RAM  {}", mem_txt(stats.ram_used_mb, stats.ram_total_mb)),
+                row(126.0, "min", &min_t);
+                row(144.0, "avg", &avg_t);
+                row(162.0, "max", &max_t);
+                row(180.0, "1%", &low_t);
+                let _ = draw_text(rt, fmt, bl, 8.0, 202.0, "CPU:");
+                row(220.0, "load", &format!("{cpu_txt}"));
+                row(238.0, "clock", &opt_u32(stats.cpu_mhz, "MHz"));
+                row(
+                    256.0,
+                    "RAM",
+                    &mem_txt(stats.ram_used_mb, stats.ram_total_mb),
                 );
-                let _ = draw_text(rt, fmt, brush, 8.0, 266.0, "GPU:");
-                let _ = draw_text(rt, fmt, brush, 8.0, 284.0, &format!("{gpu_txt}"));
-                let _ = draw_text(
-                    rt,
-                    fmt,
-                    brush,
-                    8.0,
-                    302.0,
-                    &opt_f32(stats.gpu_temp_c, "°C", 0),
+                let _ = draw_text(rt, fmt, bl, 8.0, 278.0, "GPU:");
+                row(296.0, "load", &gpu_txt);
+                row(314.0, "temp", &opt_f32(stats.gpu_temp_c, "°C", 0));
+                row(332.0, "power", &opt_f32(stats.gpu_power_w, "W", 0));
+                row(350.0, "core", &opt_u32(stats.gpu_core_mhz, "MHz"));
+                row(368.0, "mem", &opt_u32(stats.gpu_mem_mhz, "MHz"));
+                row(
+                    386.0,
+                    "VRAM",
+                    &mem_txt(stats.gpu_vram_used_mb, stats.gpu_vram_total_mb),
                 );
-                let _ = draw_text(
-                    rt,
-                    fmt,
-                    brush,
-                    8.0,
-                    320.0,
-                    &opt_f32(stats.gpu_power_w, "W", 0),
-                );
-                let _ = draw_text(
-                    rt,
-                    fmt,
-                    brush,
-                    8.0,
-                    338.0,
-                    &opt_u32(stats.gpu_core_mhz, "MHz"),
-                );
-                let _ = draw_text(
-                    rt,
-                    fmt,
-                    brush,
-                    8.0,
-                    356.0,
-                    &opt_u32(stats.gpu_mem_mhz, "MHz"),
-                );
-                let _ = draw_text(
-                    rt,
-                    fmt,
-                    brush,
-                    8.0,
-                    374.0,
-                    &format!(
-                        "VRAM {}",
-                        mem_txt(stats.gpu_vram_used_mb, stats.gpu_vram_total_mb)
-                    ),
-                );
-                let _ = draw_text(rt, fmt, brush, 8.0, 392.0, &hz_game);
-                let _ = draw_text(rt, fmt, brush, 8.0, 410.0, &display_hz());
+                row(404.0, "GAME", &hz_game);
+                row(422.0, "DISP", &display_hz());
             }
             // EndDraw fails when the D2D device is lost (driver update,
             // TDR, GPU switch). The old code ignored this and froze on a
@@ -296,7 +304,7 @@ fn main() -> Result<()> {
             if let Err(e) = overlay.end_draw() {
                 tracing::warn!("end_draw failed (device lost?): {e:?}; rebuilding");
                 overlay.invalidate();
-                white_brush = None;
+                brushes = None;
                 last_recover = Some(std::time::Instant::now());
             }
         }
@@ -308,9 +316,7 @@ fn main() -> Result<()> {
         {
             match overlay.ensure_target() {
                 Ok(()) => {
-                    if let Some(rt) = overlay.rt() {
-                        white_brush = TextBrush::new(rt, 1.0, 1.0, 1.0, text_alpha).ok();
-                    }
+                    brushes = make_brushes(&overlay, text_alpha);
                     tracing::info!("render target rebuilt");
                     last_recover = None;
                 }
@@ -356,6 +362,19 @@ fn opt_f32(v: Option<f32>, unit: &str, decimals: usize) -> String {
         Some(x) => format!("{x:.decimals$} {unit}"),
         None => "--".to_string(),
     }
+}
+
+/// Displayed readout lerps toward the raw value (~150ms settle at
+/// 60fps+). Calms flickering digits without hiding real changes;
+/// -1.0 means unset (snap on first sight). Presentation-only: the
+/// underlying data is never smoothed.
+fn smooth(current: &mut f32, target: f32) -> f32 {
+    if *current < 0.0 || !target.is_finite() {
+        *current = target.max(0.0);
+    } else {
+        *current += (target - *current) * 0.2;
+    }
+    *current
 }
 
 /// "6.34 ms", or "--" when there is no data (infinite/NaN).
