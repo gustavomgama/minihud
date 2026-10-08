@@ -14,7 +14,10 @@
 
 use super::State;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
 use windows::core::{GUID, PCWSTR};
 use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, WIN32_ERROR};
 use windows::Win32::System::Diagnostics::Etw::*;
@@ -30,6 +33,16 @@ const PRESENT_STOP_ID: u16 = 43;
 /// Analytic channel + Events keyword (matches the manifest descriptors).
 const DXGI_KEYWORDS: u64 = 0x8000_0000_0000_0002;
 const MAX_QUEUE: usize = 720;
+
+/// Events dropped because the shared state was locked (HUD read in
+/// progress). The HUD recomputes at most every 500ms, so this should
+/// stay near zero; if it climbs, reads are contending with delivery.
+static DROPPED: AtomicU64 = AtomicU64::new(0);
+
+/// Total Present_Start events dropped on lock contention, for diagnostics.
+pub fn dropped() -> u64 {
+    DROPPED.load(Ordering::Relaxed)
+}
 
 fn wide_nul(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -163,13 +176,18 @@ unsafe extern "system" fn event_callback(record: *mut EVENT_RECORD) {
         return;
     }
     // try_lock: never stall the ETW delivery thread; drop on contention.
-    if let Ok(mut st) = (*mtx).try_lock() {
-        // Store the event's QPC timestamp, not arrival time: real-time
-        // delivery batches events, so arrivals cluster and fake a 0ms avg.
-        let q = st.events.entry(pid).or_insert_with(VecDeque::new);
-        q.push_back(r.EventHeader.TimeStamp);
-        while q.len() > MAX_QUEUE {
-            q.pop_front();
+    match (*mtx).try_lock() {
+        Ok(mut st) => {
+            // Store the event's QPC timestamp, not arrival time: real-time
+            // delivery batches events, so arrivals cluster and fake a 0ms avg.
+            let q = st.events.entry(pid).or_insert_with(VecDeque::new);
+            q.push_back(r.EventHeader.TimeStamp);
+            while q.len() > MAX_QUEUE {
+                q.pop_front();
+            }
+        }
+        Err(_) => {
+            DROPPED.fetch_add(1, Ordering::Relaxed);
         }
     }
 }

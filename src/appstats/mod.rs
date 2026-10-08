@@ -2,6 +2,14 @@ pub mod etw;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+/// How often the HUD may recompute the top app. The HUD calls `top()`
+/// every frame (~50-115/s); without this cache each call locks the
+/// shared state and the ETW callback's `try_lock` starts dropping
+/// events — which shows up as flapping between the game and
+/// "-- (listening…)".
+const TOP_TTL: Duration = Duration::from_millis(500);
 
 /// One present-producing process, ranked by recent present rate.
 #[derive(Clone, Debug)]
@@ -51,6 +59,7 @@ fn qpc_now() -> i64 {
 #[derive(Clone)]
 pub struct AppTracker {
     state: Arc<Mutex<State>>,
+    cache: Arc<Mutex<(Instant, Option<AppFrame>)>>,
 }
 
 impl AppTracker {
@@ -60,6 +69,7 @@ impl AppTracker {
     pub fn start() -> Self {
         let tracker = Self {
             state: Arc::new(Mutex::new(State::default())),
+            cache: Arc::new(Mutex::new((Instant::now() - TOP_TTL, None))),
         };
         let state = tracker.state.clone();
         std::thread::spawn(move || etw::run(state));
@@ -68,7 +78,22 @@ impl AppTracker {
 
     /// Highest-rate present producer excluding `exclude_pid` (our own HUD).
     /// Needs >= 2 presents in the last second; prunes data older than 2s.
+    /// Result is cached for 500ms so per-frame HUD reads don't contend
+    /// with the ETW delivery thread.
     pub fn top(&self, exclude_pid: u32) -> Option<AppFrame> {
+        if let Ok(cache) = self.cache.lock() {
+            if cache.0.elapsed() < TOP_TTL {
+                return cache.1.clone();
+            }
+        }
+        let fresh = self.compute_top(exclude_pid);
+        if let Ok(mut cache) = self.cache.lock() {
+            *cache = (Instant::now(), fresh.clone());
+        }
+        fresh
+    }
+
+    fn compute_top(&self, exclude_pid: u32) -> Option<AppFrame> {
         let mut st = self.state.lock().ok()?;
         let freq = qpc_freq() as f64;
         let now = qpc_now();

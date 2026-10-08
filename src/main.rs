@@ -90,7 +90,7 @@ fn main() -> Result<()> {
                 None => apps.status_text(),
             };
             tracing::info!(
-                "frame {frames}: fps={:.0} avg_ms={:.2} cpu={:.0}% ram={}/{}MB vram={}/{}MB gpu={:?} app=[{app_txt}]",
+                "frame {frames}: fps={:.0} avg_ms={:.2} cpu={:.0}% ram={}/{}MB vram={}/{}MB gpu={:?} app=[{app_txt}] etw_dropped={}",
                 s.fps,
                 s.avg_ms,
                 stats.cpu_percent,
@@ -99,6 +99,7 @@ fn main() -> Result<()> {
                 stats.gpu_vram_used_mb,
                 stats.gpu_vram_total_mb,
                 stats.gpu_percent,
+                appstats::etw::dropped(),
             );
         }
         if visible {
