@@ -140,7 +140,17 @@ impl AppTracker {
             None => {
                 let inc = self.incumbent.lock().ok().and_then(|g| *g);
                 match inc {
-                    Some(p) if p != exclude_pid && st.events.contains_key(&p) => p,
+                    // Incumbent needs >= 1 present in the 1s window to
+                    // stay displayed; 0 means over a second of silence,
+                    // which reads honestly as listening, not "0fps".
+                    Some(p)
+                        if p != exclude_pid
+                            && st.events.get(&p).is_some_and(|q| {
+                                q.iter().filter(|t| **t >= win_from).count() >= 1
+                            }) =>
+                    {
+                        p
+                    }
                     _ => {
                         if let Ok(mut g) = self.incumbent.lock() {
                             *g = None;
