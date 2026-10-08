@@ -27,6 +27,8 @@ impl Default for Config {
     }
 }
 
+pub mod ui;
+
 impl Config {
     pub fn path() -> PathBuf {
         std::env::current_exe()

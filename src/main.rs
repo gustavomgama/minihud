@@ -1,9 +1,10 @@
 mod config;
+mod fps;
 mod hw;
 mod ui;
 mod win;
 
-use config::Config;
+use config::{ui as config_ui, Config};
 use hw::HwPoller;
 use ui::{draw_text, TextBrush};
 use win::overlay::Overlay;
@@ -30,6 +31,7 @@ fn main() -> Result<()> {
     overlay.set_click_through(cfg.click_through);
     tracing::info!("hotkeys: F7 toggle, F8 click-through, Shift+F7 quit (polled)");
     let mut hw = HwPoller::new(cfg.update_hw_ms, cfg.idle_hw_ms);
+    let mut fps_cap = fps::Capture::new();
     let mut visible = true;
     let mut click_through = cfg.click_through;
     let mut msg = MSG::default();
@@ -89,6 +91,9 @@ fn main() -> Result<()> {
         }
         let stats = hw.cached().clone();
         frames += 1;
+        if let Some(fps) = fps_cap.tick() {
+            tracing::info!("fps={:.1}", fps);
+        }
         // Per-iteration: did this loop present anything? Idle loops
         // sleep longer (hotkeys stay responsive either way).
         let mut drew = false;
@@ -109,10 +114,19 @@ fn main() -> Result<()> {
         f7_down = f7_now;
         let f8_now = unsafe { GetAsyncKeyState(VK_F8.0 as i32) } < 0;
         if f8_now && !f8_down {
-            click_through = !click_through;
-            overlay.set_click_through(click_through);
-            force_draw = true; // background shade changes with the mode
-            tracing::info!("click_through={click_through} (F8)");
+            if shift_down {
+                // Shift+F8: open minimal config UI (writes minihud.toml, non-blocking).
+                if let Err(e) = config_ui::edit_config() {
+                    tracing::warn!("config ui failed: {e}");
+                } else {
+                    tracing::info!("config saved (Shift+F8)");
+                }
+            } else {
+                click_through = !click_through;
+                overlay.set_click_through(click_through);
+                force_draw = true;
+                tracing::info!("click_through={click_through} (F8)");
+            }
         }
         f8_down = f8_now;
         if frames % 300 == 1 {
@@ -121,7 +135,7 @@ fn main() -> Result<()> {
                 stats.cpu_percent,
                 mem_txt_opt(stats.ram_used_mb, stats.ram_total_mb),
                 mem_txt_opt(stats.gpu_vram_used_mb, stats.gpu_vram_total_mb),
-                stats.gpu_percent,
+                stats.gpu_percent.unwrap_or(0.0),
                 format!(
                     "{}/{}",
                     stats.cpu_temp_c.map(|t| format!("{t:.0}C")).as_deref().unwrap_or("--"),

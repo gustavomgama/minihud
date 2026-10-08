@@ -19,6 +19,11 @@ pub struct HwStats {
     pub gpu_mem_mhz: Option<u32>,
     pub gpu_vram_used_mb: Option<u64>,
     pub gpu_vram_total_mb: Option<u64>,
+    // Per-app frame stats (additive, non-blocking, independent of LHM)
+    pub app_fps: Option<u32>,
+    pub app_avg_ms: Option<f32>,
+    pub app_frames: Option<u64>,
+    pub app_pid: Option<u32>,
 }
 
 pub struct HwPoller {
@@ -28,6 +33,7 @@ pub struct HwPoller {
     next: Duration,
     stable_polls: u8,
     lhm: super::lhm::LhmFeed,
+    hook: super::hook::HookFeed,
     cached: HwStats,
     prev: Option<HwStats>,
     sampled: bool,
@@ -43,6 +49,7 @@ impl HwPoller {
             active,
             idle: Duration::from_millis(idle_ms.max(active_ms.max(1))),
             lhm: super::lhm::LhmFeed::start(),
+            hook: super::hook::HookFeed::start(),
             cached: HwStats::default(),
             prev: None,
             sampled: false,
@@ -62,6 +69,15 @@ impl HwPoller {
         if let Some(sensors) = self.lhm.latest(Duration::from_secs(3)) {
             super::lhm::apply(&sensors, &mut self.cached);
             self.sampled = true;
+        }
+        // Additive per-app frame data: independent, never blocks, fail-open.
+        if let Some(stats) = self.hook.latest(Duration::from_millis(1000)) {
+            if let Some(s) = stats.first() {
+                self.cached.app_fps = Some(s.fps);
+                self.cached.app_avg_ms = Some(s.avg_ms);
+                self.cached.app_frames = Some(s.frames);
+                self.cached.app_pid = Some(s.pid);
+            }
         }
         if self.changed_since_last() {
             self.next = self.active;

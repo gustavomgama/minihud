@@ -17,7 +17,7 @@
 use hook_ipc as ipc;
 use std::ffi::c_void;
 use std::time::{Duration, Instant};
-use windows::core::{PCSTR, PCWSTR, PWSTR, BOOL};
+use windows::core::{BOOL, PCSTR, PCWSTR, PWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
 use windows::Win32::System::Diagnostics::ToolHelp::*;
@@ -44,8 +44,12 @@ fn wstr(s: &str) -> Vec<u16> {
 
 fn usage() -> ! {
     eprintln!("usage:");
-    eprintln!("  hook-host launch <exe> [-- args...]   spawn suspended, inject, resume, report fps");
-    eprintln!("  hook-host attach <pid>                 inject into a running process (explicit opt-in)");
+    eprintln!(
+        "  hook-host launch <exe> [-- args...]   spawn suspended, inject, resume, report fps"
+    );
+    eprintln!(
+        "  hook-host attach <pid>                 inject into a running process (explicit opt-in)"
+    );
     std::process::exit(2);
 }
 
@@ -127,7 +131,9 @@ unsafe fn remote_proc(proc: HANDLE, local_dll: &str, export: &str) -> windows::c
     }
     let _ = CloseHandle(snap);
     if base == 0 {
-        eprintln!("{local_dll} not loaded in target (hook-rt must be injected first for mh_install)");
+        eprintln!(
+            "{local_dll} not loaded in target (hook-rt must be injected first for mh_install)"
+        );
         return Err(windows::core::Error::from_win32());
     }
     Ok(base.wrapping_add((local_fn as usize).wrapping_sub(local.0 as usize)))
@@ -463,7 +469,10 @@ unsafe fn read_loop(proc: HANDLE, pid: u32) -> i32 {
         );
         std::thread::sleep(Duration::from_millis(1000));
     }
-    println!("summary: frames={total} loss={lost} detour_calls={}", reader.calls());
+    println!(
+        "summary: frames={total} loss={lost} detour_calls={}",
+        reader.calls()
+    );
     if lost > 0 && total > 0 {
         eprintln!(
             "note: {:.2}% slots torn (reader slower than writer bursts)",
