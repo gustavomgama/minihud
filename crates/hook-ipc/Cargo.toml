@@ -1,0 +1,6 @@
+[package]
+name = "hook-ipc"
+version = "0.1.0"
+edition = "2021"
+description = "Shared-memory wire format between hook-rt (writer, in-game) and hook-host (reader). No dependencies by design: both sides must agree byte-for-byte."
+license = "MIT"

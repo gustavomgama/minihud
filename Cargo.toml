@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "crates/hook-ipc", "crates/hook-rt", "crates/hook-host", "crates/hook-test"]
+
 [package]
 name = "minihud"
 version = "0.1.0"
