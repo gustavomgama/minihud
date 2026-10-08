@@ -1,15 +1,18 @@
+mod appstats;
 mod config;
 mod hw;
 mod timing;
 mod ui;
 mod win;
 
+use appstats::AppTracker;
 use config::Config;
 use hw::HwPoller;
 use timing::PresentTimer;
 use ui::{draw_graph, draw_text, TextBrush};
 use win::overlay::Overlay;
 use windows::core::Result;
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_F7, VK_F8};
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, WM_QUIT,
@@ -19,13 +22,16 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
     let cfg = Config::load();
     tracing::info!("config at {:?}: {:?}", Config::path(), cfg);
-    let win_h = if cfg.show_frametime_graph { 132 } else { 76 };
+    let win_h = if cfg.show_frametime_graph { 150 } else { 96 };
     let overlay = Overlay::new("minihud", cfg.x, cfg.y, 500, win_h, cfg.text_size)?;
     tracing::info!("overlay hwnd: {:?}", overlay.hwnd);
     overlay.set_click_through(cfg.click_through);
     tracing::info!("hotkeys: F7 toggle, F8 click-through (polled)");
     let mut timer = PresentTimer::new(180);
     let mut hw = HwPoller::new(cfg.update_hw_ms);
+    // Per-app presents via ETW (needs elevation; degrades to placeholder).
+    let apps = AppTracker::start();
+    let self_pid = unsafe { GetCurrentProcessId() };
     let mut visible = true;
     let mut click_through = cfg.click_through;
     let mut msg = MSG::default();
@@ -79,8 +85,12 @@ fn main() -> Result<()> {
         f8_down = f8_now;
         if frames % 300 == 1 {
             let s = timer.stats();
+            let app_txt = match apps.top(self_pid) {
+                Some(a) => format!("{} {:.0}fps {:.2}ms", a.name, a.fps, a.avg_ms),
+                None => apps.status_text(),
+            };
             tracing::info!(
-                "frame {frames}: fps={:.0} avg_ms={:.2} cpu={:.0}% ram={}/{}MB vram={}/{}MB gpu={:?}",
+                "frame {frames}: fps={:.0} avg_ms={:.2} cpu={:.0}% ram={}/{}MB vram={}/{}MB gpu={:?} app=[{app_txt}]",
                 s.fps,
                 s.avg_ms,
                 stats.cpu_percent,
@@ -122,20 +132,28 @@ fn main() -> Result<()> {
                     Some(g) => format!("{g:3.0}%"),
                     None => "--".to_string(),
                 };
-                let line2 = format!(
+                let line2 = match apps.top(self_pid) {
+                    Some(a) => format!(
+                        "APP  {} {:3.0} FPS | {:5.2} ms avg",
+                        a.name, a.fps, a.avg_ms
+                    ),
+                    None => apps.status_text(),
+                };
+                let line3 = format!(
                     "SYS  CPU {:3.0}% | RAM {}",
                     stats.cpu_percent,
                     mem_txt(stats.ram_used_mb, stats.ram_total_mb),
                 );
-                let line3 = format!(
+                let line4 = format!(
                     "GPU  {gpu_txt} | VRAM {}",
                     mem_txt(stats.gpu_vram_used_mb, stats.gpu_vram_total_mb),
                 );
                 let _ = draw_text(rt, fmt, brush, 8.0, 4.0, &line1);
                 let _ = draw_text(rt, fmt, brush, 8.0, 22.0, &line2);
                 let _ = draw_text(rt, fmt, brush, 8.0, 40.0, &line3);
+                let _ = draw_text(rt, fmt, brush, 8.0, 58.0, &line4);
                 if cfg.show_frametime_graph {
-                    let _ = draw_graph(rt, brush, timer.samples_ms(), 8.0, 62.0, 460.0, 56.0);
+                    let _ = draw_graph(rt, brush, timer.samples_ms(), 8.0, 80.0, 460.0, 52.0);
                 }
             }
             let _ = overlay.end_draw();
@@ -147,7 +165,11 @@ fn main() -> Result<()> {
 /// "12.1/31.9 GB" or "512/1024 MB" — GB when the total is 2+ GB.
 fn mem_txt(used_mb: u64, total_mb: u64) -> String {
     if total_mb >= 2048 {
-        format!("{:.1}/{:.1} GB", used_mb as f64 / 1024.0, total_mb as f64 / 1024.0)
+        format!(
+            "{:.1}/{:.1} GB",
+            used_mb as f64 / 1024.0,
+            total_mb as f64 / 1024.0
+        )
     } else {
         format!("{used_mb}/{total_mb} MB")
     }

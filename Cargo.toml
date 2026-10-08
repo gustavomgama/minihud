@@ -35,6 +35,7 @@ features = [
   "Win32_System_LibraryLoader",
   "Win32_System_Memory",
   "Win32_System_SystemInformation",
+  "Win32_System_Time",
   "Win32_System_ProcessStatus",
   "Win32_System_Wmi",
   "Win32_System_Com",
