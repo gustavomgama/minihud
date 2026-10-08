@@ -25,7 +25,7 @@ fn main() -> Result<()> {
     let cfg = Config::load();
     tracing::info!("config at {:?}: {:?}", Config::path(), cfg);
     tracing::info!(
-        "poll cadence: hw={}ms active/{}ms idle, app=200ms recompute (ETW delivers ~1s batches)",
+        "poll cadence: hw={}ms active/{}ms idle, app=700ms recompute (ETW delivers ~1s batches)",
         cfg.update_hw_ms,
         cfg.idle_hw_ms
     );

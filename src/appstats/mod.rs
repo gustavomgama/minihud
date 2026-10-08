@@ -4,11 +4,11 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// Recompute cadence, global default: 200ms. The lock holds are
+/// Recompute cadence, global default: 700ms. The lock holds are
 /// microseconds and ETW delivery is ~1s-batched anyway, so recomputing
 /// faster just re-reads identical data; slower makes the HUD feel
-/// dead next to 200ms HW rows. Single value, no active/idle split.
-const TOP_TTL: Duration = Duration::from_millis(200);
+/// dead next to HW rows. Single value, no active/idle split.
+const TOP_TTL: Duration = Duration::from_millis(700);
 
 /// One present-producing process, ranked by recent present rate.
 #[derive(Clone, Debug)]
