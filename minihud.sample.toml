@@ -1,6 +1,8 @@
 # minihud sample config — copy to `minihud.toml` next to minihud.exe.
-# Unknown keys are ignored; out-of-range values are clamped at load
-# (a typo falls back to defaults with a log warning, never a crash).
+# Precedence: anything listed here overrides the built-in defaults, per
+# key — a file with a single line works; omit what you don't care about.
+# Unknown keys are ignored; unparseable files fall back to all-defaults
+# with a log warning (a typo never wedges the overlay).
 
 # Overlay position, pixels from top-left. Rewritten automatically
 # whenever you drag the window (F8 off to unlock dragging).

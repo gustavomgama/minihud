@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub x: i32,
     pub y: i32,
@@ -69,5 +70,34 @@ impl Config {
         if let Ok(s) = toml::to_string_pretty(self) {
             let _ = std::fs::write(p, s);
         }
+    }
+
+    /// Merge a toml snippet over defaults (what load() does with a file).
+    #[cfg(test)]
+    fn from_snippet(s: &str) -> Self {
+        toml::from_str(s).unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partial_config_overrides_only_listed_keys() {
+        let cfg = Config::from_snippet("x = 100\nupdate_hw_ms = 123\n");
+        assert_eq!(cfg.x, 100);
+        assert_eq!(cfg.update_hw_ms, 123);
+        // Everything else stays default.
+        let d = Config::default();
+        assert_eq!(cfg.y, d.y);
+        assert_eq!(cfg.opacity, d.opacity);
+        assert_eq!(cfg.click_through, d.click_through);
+    }
+
+    #[test]
+    fn garbage_config_falls_back_to_defaults() {
+        let cfg = Config::from_snippet("update_hw_ms = \"fast\"\n");
+        assert_eq!(cfg, Config::default());
     }
 }
