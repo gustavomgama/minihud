@@ -20,7 +20,7 @@ impl Default for Config {
             opacity: 0.95,
             text_size: 14.0,
             show_frametime_graph: true,
-            update_hw_ms: 50,
+            update_hw_ms: 100,
             click_through: true,
         }
     }

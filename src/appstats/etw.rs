@@ -144,10 +144,10 @@ unsafe fn run_inner(state: &Arc<Mutex<State>>) {
     (*props).Wnode.Guid = SESSION_GUID;
     (*props).LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
     // Mirror PresentMon's buffering (defaults starve under game bursts).
-    (*props).BufferSize = 64; // KB per buffer
-    (*props).MinimumBuffers = 256;
-    (*props).MaximumBuffers = 1024;
-    (*props).FlushTimer = 1; // seconds; bound delivery lag explicitly
+    (*props).BufferSize = 16; // KB per buffer: small buffers fill fast
+    (*props).MinimumBuffers = 64; // at game volumes (~15-60KB/s), so delivery
+    (*props).MaximumBuffers = 256; // batches stay short instead of ~1s+
+    (*props).FlushTimer = 1; // seconds; hard bound on delivery lag
     (*props).LoggerNameOffset = std::mem::size_of::<EVENT_TRACE_PROPERTIES>() as u32;
     std::ptr::copy_nonoverlapping(
         name.as_ptr(),
