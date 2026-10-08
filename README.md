@@ -33,10 +33,10 @@ graph on/off, hw poll interval, click-through default).
 
 Cadence is adaptive around a 700ms global default, not fixed: HW polls
 at `update_hw_ms` (default 700) while values move and backs off toward
-`idle_hw_ms` (default 2000) when quiet; the APP row recomputes every
-700ms even though ETW delivers in ~1s batches; frames only present
-when the pixels would differ. The frame log shows live `hwms=` and
-skipped-frame counts. Exceptions, all deliberate: the 8/30ms main-loop
+`idle_hw_ms` (default 2000) when quiet; the APP row recomputes at
+100ms while tracking a game, 1000ms while listening (ETW delivers in
+~1s batches regardless); frames only present when the pixels would
+differ. The frame log shows live `hwms=` and skipped-frame counts. Exceptions, all deliberate: the 8/30ms main-loop
 heartbeat (hotkey latency, costs nothing when skipping), the 1s ETW
 flush floor (platform minimum), ETW retry backoff and the 2s device-
 recovery timer (recovery paths, not data rates).

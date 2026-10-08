@@ -4,11 +4,12 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// Recompute cadence, global default: 700ms. The lock holds are
-/// microseconds and ETW delivery is ~1s-batched anyway, so recomputing
-/// faster just re-reads identical data; slower makes the HUD feel
-/// dead next to HW rows. Single value, no active/idle split.
-const TOP_TTL: Duration = Duration::from_millis(700);
+/// Recompute cadence, dynamic by outcome: 100ms while a game is
+/// tracked (numbers stay live), 1000ms while listening (ETW delivers
+/// ~1s batches anyway, so faster re-reads just spin). Lock holds are
+/// microseconds either way; this only sets display freshness.
+const TOP_TTL_ACTIVE: Duration = Duration::from_millis(100);
+const TOP_TTL_IDLE: Duration = Duration::from_millis(1000);
 
 /// One present-producing process, ranked by recent present rate.
 #[derive(Clone, Debug)]
@@ -108,7 +109,7 @@ impl AppTracker {
     pub fn start() -> Self {
         let tracker = Self {
             state: Arc::new(Mutex::new(State::default())),
-            cache: Arc::new(Mutex::new((Instant::now() - TOP_TTL, None))),
+            cache: Arc::new(Mutex::new((Instant::now() - TOP_TTL_IDLE, None))),
             incumbent: Arc::new(Mutex::new(None)),
         };
         let state = tracker.state.clone();
@@ -122,8 +123,15 @@ impl AppTracker {
     /// Result is cached for 500ms so per-frame HUD reads don't contend
     /// with the ETW delivery thread.
     pub fn top(&self, exclude_pid: u32, filter: Option<&ProcessFilter>) -> Option<AppFrame> {
+        // Dynamic TTL from the last outcome: hot while tracking,
+        // relaxed while listening.
         if let Ok(cache) = self.cache.lock() {
-            if cache.0.elapsed() < TOP_TTL {
+            let ttl = if cache.1.is_some() {
+                TOP_TTL_ACTIVE
+            } else {
+                TOP_TTL_IDLE
+            };
+            if cache.0.elapsed() < ttl {
                 return cache.1.clone();
             }
         }
