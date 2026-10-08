@@ -95,7 +95,12 @@ fn wide_nul(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Events seen per DXGI present opcode, for diagnostics.
+/// Our own PID. The HUD never tracks itself: self presents are dropped
+/// in the callback so maps, totals and snapshots only ever contain
+/// other processes.
+static SELF_PID: AtomicU64 = AtomicU64::new(0);
+
+/// Events seen per DXGI present opcode, for diagnostics (self excluded).
 static SEEN_START: AtomicU64 = AtomicU64::new(0);
 static SEEN_STOP: AtomicU64 = AtomicU64::new(0);
 
@@ -108,7 +113,11 @@ fn set_err(state: &Arc<Mutex<State>>, e: impl Into<String>) {
 }
 
 pub fn run(state: Arc<Mutex<State>>) {
-    unsafe { run_inner(&state) }
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    unsafe {
+        SELF_PID.store(GetCurrentProcessId() as u64, Ordering::Relaxed);
+        run_inner(&state)
+    }
 }
 
 unsafe fn run_inner(state: &Arc<Mutex<State>>) {
@@ -241,6 +250,10 @@ unsafe extern "system" fn event_callback(record: *mut EVENT_RECORD) {
     }
     let pid = r.EventHeader.ProcessId;
     if pid == 0 {
+        return;
+    }
+    // Never track ourselves (see SELF_PID).
+    if pid as u64 == SELF_PID.load(Ordering::Relaxed) {
         return;
     }
     // Context holds *const Mutex<State> (see into_raw note above).
