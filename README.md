@@ -3,16 +3,19 @@
 Minimal Windows performance overlay. FPS + frametime + light system stats.
 Rust + `windows-rs` + Direct2D. No UI framework.
 
-## Shows
+## Shows (RTSS-style vertical stack, "--" when silent)
 
-- Line 1: FPS, avg/min/max frametime (overlay's own refresh rate)
-- Line 2: CPU %, RAM used/total, GPU % (best-effort), VRAM used/total
-- Frametime graph (last 180 frames)
+- App name + big FPS, game frametime graph
+- API (DXGI for now), min / avg / max / 1% low
+- CPU: load %, RAM used/total
+- GPU: load %, VRAM used/total
+- Game Hz + display Hz
 
 ## Keys
 
 - F7: show/hide overlay
-- F8: toggle click-through
+- F8: click-through on/off. With it OFF, drag the overlay anywhere
+  with the left mouse button; position is saved next to the exe.
 
 ## Config
 

@@ -1,5 +1,5 @@
 use windows::core::{Result, PCWSTR};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U;
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Factory1, ID2D1HwndRenderTarget, D2D1_FACTORY_TYPE_SINGLE_THREADED,
@@ -12,11 +12,13 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows::Win32::Graphics::Gdi::HBRUSH;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, LoadCursorW, PostQuitMessage,
-    RegisterClassW, SetWindowLongPtrW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW,
-    GWL_EXSTYLE, HWND_TOPMOST, IDC_ARROW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SW_HIDE, SW_SHOW, WM_DESTROY, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, GetWindowRect, LoadCursorW,
+    PostQuitMessage, RegisterClassW, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    CS_HREDRAW, CS_VREDRAW, GWL_EXSTYLE, HTCAPTION, HWND_TOPMOST, IDC_ARROW, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WM_DESTROY,
+    WM_EXITSIZEMOVE, WM_LBUTTONDOWN, WM_NCLBUTTONDOWN, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_EX_TRANSPARENT, WS_POPUP, WS_VISIBLE,
 };
 
@@ -26,6 +28,7 @@ pub struct Overlay {
     pub dwrite: IDWriteFactory,
     pub rt: Option<ID2D1HwndRenderTarget>,
     pub text_fmt: Option<IDWriteTextFormat>,
+    pub text_fmt_big: Option<IDWriteTextFormat>,
     interactive: std::sync::atomic::AtomicBool,
 }
 
@@ -46,7 +49,37 @@ unsafe extern "system" fn wnd_proc(
             PostQuitMessage(0);
             LRESULT(0)
         }
+        // Drag anywhere with the left button. Only reachable when
+        // click-through is OFF (F8); with it on, the OS never delivers
+        // mouse messages to us in the first place.
+        WM_LBUTTONDOWN => {
+            let _ = ReleaseCapture();
+            SendMessageW(
+                hwnd,
+                WM_NCLBUTTONDOWN,
+                Some(WPARAM(HTCAPTION as usize)),
+                None,
+            )
+        }
+        // Drag finished: persist the new position next to the exe.
+        WM_EXITSIZEMOVE => {
+            persist_position(hwnd);
+            LRESULT(0)
+        }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+/// Read the window rect and store x/y in the on-disk config.
+fn persist_position(hwnd: HWND) {
+    unsafe {
+        let mut r = RECT::default();
+        if GetWindowRect(hwnd, &mut r).is_ok() {
+            let mut cfg = crate::config::Config::load();
+            cfg.x = r.left;
+            cfg.y = r.top;
+            cfg.save();
+        }
     }
 }
 
@@ -91,6 +124,7 @@ impl Overlay {
             dwrite,
             rt: None,
             text_fmt: None,
+            text_fmt_big: None,
             interactive: std::sync::atomic::AtomicBool::new(false),
         };
         ov.create_resources(w, h, font_size)?;
@@ -134,12 +168,27 @@ impl Overlay {
                 PCWSTR(wstr("en-us").as_ptr()),
             )?
         };
+        // Headline number (RTSS-style big FPS), ~1.8x the body size.
+        let fmt_big = unsafe {
+            self.dwrite.CreateTextFormat(
+                PCWSTR(wstr("Consolas").as_ptr()),
+                None,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                (font_size * 1.8).clamp(18.0, 48.0),
+                PCWSTR(wstr("en-us").as_ptr()),
+            )?
+        };
         unsafe {
             fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)?;
             fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
+            fmt_big.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)?;
+            fmt_big.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
         }
         self.rt = Some(rt);
         self.text_fmt = Some(fmt);
+        self.text_fmt_big = Some(fmt_big);
         Ok(())
     }
 
@@ -235,5 +284,8 @@ impl Overlay {
     }
     pub fn fmt(&self) -> Option<&IDWriteTextFormat> {
         self.text_fmt.as_ref()
+    }
+    pub fn fmt_big(&self) -> Option<&IDWriteTextFormat> {
+        self.text_fmt_big.as_ref()
     }
 }

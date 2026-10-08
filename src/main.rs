@@ -26,7 +26,7 @@ fn main() -> Result<()> {
     if let Some(f) = &args.process {
         tracing::info!("process filter: {}", f.label());
     }
-    let win_h = if cfg.show_frametime_graph { 126 } else { 72 };
+    let win_h = 350; // fixed: stable rows, no resize flicker
     let overlay = Overlay::new("minihud", cfg.x, cfg.y, 500, win_h, cfg.text_size)?;
     tracing::info!("overlay hwnd: {:?}", overlay.hwnd);
     overlay.set_click_through(cfg.click_through);
@@ -116,7 +116,9 @@ fn main() -> Result<()> {
         }
         if visible {
             overlay.begin_draw();
-            if let (Some(rt), Some(fmt)) = (overlay.rt(), overlay.fmt()) {
+            if let (Some(rt), Some(fmt), Some(big)) =
+                (overlay.rt(), overlay.fmt(), overlay.fmt_big())
+            {
                 let brush_opt = white_brush.as_ref().map(|b| &b.brush);
                 // Fall back to a per-frame brush if the cached one failed.
                 let _fallback;
@@ -134,38 +136,87 @@ fn main() -> Result<()> {
                         }
                     }
                 };
-                // Sections: APP = tracked game, SYS = machine, GPU = adapter.
-                // No HUD-own stats on screen by design; the graph shows the
-                // GAME's frame intervals, never the overlay's refresh.
+                // RTSS-style vertical stack. "--" wherever the game is
+                // silent; layout never shifts. No overlay-own stats on
+                // screen by design (temps/clocks/watts need vendor APIs
+                // and are omitted until then, not faked).
+                let app = apps.top(self_pid, args.process.as_ref());
+                let (app_name, fps_txt, min_t, avg_t, max_t, low_t, hz_game) = match &app {
+                    Some(a) => {
+                        let iv = &a.recent_ms;
+                        let min = iv.iter().cloned().fold(f32::INFINITY, f32::min);
+                        let max = iv.iter().cloned().fold(0.0f32, f32::max);
+                        (
+                            a.name.clone(),
+                            format!("{:3.0} FPS", a.fps),
+                            fmt_ms(min),
+                            format!("{:5.2} ms", a.avg_ms),
+                            fmt_ms(max),
+                            match low1_fps(iv) {
+                                Some(f) => format!("{f:3.0} FPS"),
+                                None => "--".to_string(),
+                            },
+                            format!("{:3.0} Hz", a.fps),
+                        )
+                    }
+                    None => (
+                        apps.status_text(args.process.as_ref()),
+                        "--".to_string(),
+                        "--".to_string(),
+                        "--".to_string(),
+                        "--".to_string(),
+                        "--".to_string(),
+                        "--".to_string(),
+                    ),
+                };
                 let gpu_txt = match stats.gpu_percent {
                     Some(g) => format!("{g:3.0}%"),
                     None => "--".to_string(),
                 };
-                let app = apps.top(self_pid, args.process.as_ref());
-                let line1 = match &app {
-                    Some(a) => format!(
-                        "APP  {} {:3.0} FPS | {:5.2} ms avg",
-                        a.name, a.fps, a.avg_ms
-                    ),
-                    None => apps.status_text(args.process.as_ref()),
-                };
-                let line2 = format!(
-                    "SYS  CPU {:3.0}% | RAM {}",
-                    stats.cpu_percent,
-                    mem_txt(stats.ram_used_mb, stats.ram_total_mb),
-                );
-                let line3 = format!(
-                    "GPU  {gpu_txt} | VRAM {}",
-                    mem_txt(stats.gpu_vram_used_mb, stats.gpu_vram_total_mb),
-                );
-                let _ = draw_text(rt, fmt, brush, 8.0, 4.0, &line1);
-                let _ = draw_text(rt, fmt, brush, 8.0, 22.0, &line2);
-                let _ = draw_text(rt, fmt, brush, 8.0, 40.0, &line3);
+                let _ = draw_text(rt, fmt, brush, 8.0, 4.0, &app_name);
+                let _ = draw_text(rt, big, brush, 8.0, 20.0, &fps_txt);
                 if cfg.show_frametime_graph {
                     if let Some(a) = &app {
-                        let _ = draw_graph(rt, brush, &a.recent_ms, 8.0, 62.0, 460.0, 52.0);
+                        let _ = draw_graph(rt, brush, &a.recent_ms, 150.0, 8.0, 300.0, 44.0);
                     }
                 }
+                let _ = draw_text(rt, fmt, brush, 8.0, 108.0, "API  DXGI");
+                let _ = draw_text(rt, fmt, brush, 8.0, 126.0, &format!("min  {min_t}"));
+                let _ = draw_text(rt, fmt, brush, 8.0, 144.0, &format!("avg  {avg_t}"));
+                let _ = draw_text(rt, fmt, brush, 8.0, 162.0, &format!("max  {max_t}"));
+                let _ = draw_text(rt, fmt, brush, 8.0, 180.0, &format!("1%   {low_t}"));
+                let _ = draw_text(rt, fmt, brush, 8.0, 198.0, "CPU:");
+                let _ = draw_text(
+                    rt,
+                    fmt,
+                    brush,
+                    8.0,
+                    216.0,
+                    &format!("{:3.0} %", stats.cpu_percent),
+                );
+                let _ = draw_text(
+                    rt,
+                    fmt,
+                    brush,
+                    8.0,
+                    234.0,
+                    &format!("RAM  {}", mem_txt(stats.ram_used_mb, stats.ram_total_mb)),
+                );
+                let _ = draw_text(rt, fmt, brush, 8.0, 252.0, "GPU:");
+                let _ = draw_text(rt, fmt, brush, 8.0, 270.0, &format!("{gpu_txt}"));
+                let _ = draw_text(
+                    rt,
+                    fmt,
+                    brush,
+                    8.0,
+                    288.0,
+                    &format!(
+                        "VRAM {}",
+                        mem_txt(stats.gpu_vram_used_mb, stats.gpu_vram_total_mb)
+                    ),
+                );
+                let _ = draw_text(rt, fmt, brush, 8.0, 306.0, &hz_game);
+                let _ = draw_text(rt, fmt, brush, 8.0, 324.0, &display_hz());
             }
             let _ = overlay.end_draw();
         }
@@ -184,6 +235,57 @@ fn mem_txt(used_mb: u64, total_mb: u64) -> String {
     } else {
         format!("{used_mb}/{total_mb} MB")
     }
+}
+
+/// "6.34 ms", or "--" when there is no data (infinite/NaN).
+fn fmt_ms(v: f32) -> String {
+    if v.is_finite() && v >= 0.0 {
+        format!("{v:5.2} ms")
+    } else {
+        "--".to_string()
+    }
+}
+
+/// 1% low FPS: mean of the worst 1% frame intervals, as a rate.
+fn low1_fps(samples: &[f32]) -> Option<f32> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let k = ((sorted.len() as f64 * 0.01).ceil() as usize)
+        .max(1)
+        .min(sorted.len());
+    let avg = sorted[..k].iter().sum::<f32>() / k as f32;
+    if avg > 0.0 {
+        Some(1000.0 / avg)
+    } else {
+        None
+    }
+}
+
+/// Display refresh rate ("60 Hz"), cached. "--" when unreadable.
+fn display_hz() -> String {
+    use std::sync::OnceLock;
+    use windows::Win32::Graphics::Gdi::{EnumDisplaySettingsW, DEVMODEW, ENUM_CURRENT_SETTINGS};
+    static HZ: OnceLock<String> = OnceLock::new();
+    HZ.get_or_init(|| unsafe {
+        let mut dm = DEVMODEW::default();
+        dm.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+        if EnumDisplaySettingsW(
+            windows::core::PCWSTR::null(),
+            ENUM_CURRENT_SETTINGS,
+            &mut dm,
+        )
+        .as_bool()
+            && dm.dmDisplayFrequency > 1
+        {
+            format!("{} Hz", dm.dmDisplayFrequency)
+        } else {
+            "--".to_string()
+        }
+    })
+    .clone()
 }
 
 /// Minimal CLI: `--process NAME|PID` pins the APP row to one process,
