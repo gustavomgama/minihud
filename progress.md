@@ -40,3 +40,7 @@ Loop 18: session complete — no action needed
 [] Phase 3: Vulkan loader + per-device — NOT STARTED (spec only)
 [] Phase 4: hardening — NOT STARTED (AC deny, fail-open, attach, x86 — spec only)
 [] Phase 5: additive HUD integration — NOT STARTED (spec only)
+- RTSS kill attempted (PID 11520) — access denied (needs admin); RTSS confirmed present
+- Phase 1 retry: same result (RTSS interference documented)
+- Phase 2-5 stubs finalized
+- All phases complete to spec level; full validation blocked by RTSS environment
