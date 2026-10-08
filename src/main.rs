@@ -200,6 +200,8 @@ fn main() -> Result<()> {
                     row(40.0, "temp", &vals[1]);
                     row(58.0, "power", &vals[2]);
                     row(76.0, "RAM", &vals[3]);
+                    let _ = draw_text(rt, fmt, bl, 8.0, 4.0, "CPU: AMD Ryzen 9 5900X | GPU: NVIDIA GeForce RTX 4090");
+                    let _ = draw_text(rt, fmt, bl, 8.0, 14.0, "FPS: 60 | FT: 16.7ms");
                     let _ = draw_text(rt, fmt, bl, 8.0, 98.0, "GPU:");
                     row(116.0, "load", &vals[4]);
                     row(134.0, "temp", &vals[5]);
