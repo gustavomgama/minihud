@@ -26,7 +26,7 @@ fn main() -> Result<()> {
     if let Some(f) = &args.process {
         tracing::info!("process filter: {}", f.label());
     }
-    let win_h = 350; // fixed: stable rows, no resize flicker
+    let win_h = 436; // fixed: stable rows, no resize flicker
     let overlay = Overlay::new("minihud", cfg.x, cfg.y, 500, win_h, cfg.text_size)?;
     tracing::info!("overlay hwnd: {:?}", overlay.hwnd);
     overlay.set_click_through(cfg.click_through);
@@ -100,8 +100,25 @@ fn main() -> Result<()> {
                 .map(|(n, _, c, a)| format!("{n}:{c}/{a}"))
                 .collect::<Vec<_>>()
                 .join(",");
+            let nv_txt = format!(
+                "{}/{}/{}",
+                stats
+                    .gpu_temp_c
+                    .map(|t| format!("{t:.0}C"))
+                    .as_deref()
+                    .unwrap_or("--"),
+                stats
+                    .gpu_power_w
+                    .map(|p| format!("{p:.0}W"))
+                    .as_deref()
+                    .unwrap_or("--"),
+                match (stats.gpu_core_mhz, stats.gpu_mem_mhz) {
+                    (Some(c), Some(m)) => format!("{c}/{m}MHz"),
+                    _ => "--".to_string(),
+                },
+            );
             tracing::info!(
-                "frame {frames}: fps={:.0} avg_ms={:.2} cpu={:.0}% ram={}/{}MB vram={}/{}MB gpu={:?} app=[{app_txt}] etw_dropped={} etw_start={etw_start} etw_stop={etw_stop} pids=[{snap}] lagmax={}ms",
+                "frame {frames}: fps={:.0} avg_ms={:.2} cpu={:.0}% ram={}/{}MB vram={}/{}MB gpu={:?} app=[{app_txt}] etw_dropped={} etw_start={etw_start} etw_stop={etw_stop} pids=[{snap}] lagmax={}ms nv=[{nv_txt}] cpumhz={}",
                 s.fps,
                 s.avg_ms,
                 stats.cpu_percent,
@@ -112,6 +129,7 @@ fn main() -> Result<()> {
                 stats.gpu_percent,
                 appstats::etw::dropped(),
                 appstats::etw::max_lag_ms(),
+                stats.cpu_mhz.map(|m| m.to_string()).as_deref().unwrap_or("--"),
             );
         }
         if visible {
@@ -199,29 +217,62 @@ fn main() -> Result<()> {
                     216.0,
                     &format!("{:3.0} %", stats.cpu_percent),
                 );
+                let _ = draw_text(rt, fmt, brush, 8.0, 230.0, &opt_u32(stats.cpu_mhz, "MHz"));
                 let _ = draw_text(
                     rt,
                     fmt,
                     brush,
                     8.0,
-                    234.0,
+                    248.0,
                     &format!("RAM  {}", mem_txt(stats.ram_used_mb, stats.ram_total_mb)),
                 );
-                let _ = draw_text(rt, fmt, brush, 8.0, 252.0, "GPU:");
-                let _ = draw_text(rt, fmt, brush, 8.0, 270.0, &format!("{gpu_txt}"));
+                let _ = draw_text(rt, fmt, brush, 8.0, 266.0, "GPU:");
+                let _ = draw_text(rt, fmt, brush, 8.0, 284.0, &format!("{gpu_txt}"));
                 let _ = draw_text(
                     rt,
                     fmt,
                     brush,
                     8.0,
-                    288.0,
+                    302.0,
+                    &opt_f32(stats.gpu_temp_c, "°C", 0),
+                );
+                let _ = draw_text(
+                    rt,
+                    fmt,
+                    brush,
+                    8.0,
+                    320.0,
+                    &opt_f32(stats.gpu_power_w, "W", 0),
+                );
+                let _ = draw_text(
+                    rt,
+                    fmt,
+                    brush,
+                    8.0,
+                    338.0,
+                    &opt_u32(stats.gpu_core_mhz, "MHz"),
+                );
+                let _ = draw_text(
+                    rt,
+                    fmt,
+                    brush,
+                    8.0,
+                    356.0,
+                    &opt_u32(stats.gpu_mem_mhz, "MHz"),
+                );
+                let _ = draw_text(
+                    rt,
+                    fmt,
+                    brush,
+                    8.0,
+                    374.0,
                     &format!(
                         "VRAM {}",
                         mem_txt(stats.gpu_vram_used_mb, stats.gpu_vram_total_mb)
                     ),
                 );
-                let _ = draw_text(rt, fmt, brush, 8.0, 306.0, &hz_game);
-                let _ = draw_text(rt, fmt, brush, 8.0, 324.0, &display_hz());
+                let _ = draw_text(rt, fmt, brush, 8.0, 392.0, &hz_game);
+                let _ = draw_text(rt, fmt, brush, 8.0, 410.0, &display_hz());
             }
             let _ = overlay.end_draw();
         }
@@ -239,6 +290,22 @@ fn mem_txt(used_mb: u64, total_mb: u64) -> String {
         )
     } else {
         format!("{used_mb}/{total_mb} MB")
+    }
+}
+
+/// "4442 MHz" / "70 °C" / "187 W", or "--" when the sensor is missing.
+fn opt_u32(v: Option<u32>, unit: &str) -> String {
+    match v {
+        Some(x) => format!("{x} {unit}"),
+        None => "--".to_string(),
+    }
+}
+
+/// Same for f32 sensors (temp, power), with decimals.
+fn opt_f32(v: Option<f32>, unit: &str, decimals: usize) -> String {
+    match v {
+        Some(x) => format!("{x:.decimals$} {unit}"),
+        None => "--".to_string(),
     }
 }
 
