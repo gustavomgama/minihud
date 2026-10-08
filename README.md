@@ -10,8 +10,8 @@ Rust + `windows-rs` + Direct2D. No UI framework.
   ceiling so steady rates read flat, 16.7ms target line), detected
   graphics API (D3D12/D3D11/Vulkan/D3D9/OpenGL from loaded runtime
   dlls; `--` when the process blocks inspection)
-- Two-tier text (dim labels, bright values); displayed numbers ease
-  toward raw values (~150ms settle), data itself never smoothed
+- Two-tier text (dim labels, bright values); digits step exactly when
+  source data steps (no animated transitions between polls)
 - min / avg / max / 1% low frametime, game Hz + display Hz
 - CPU: load %, avg clock MHz (via CallNtPowerInformation), RAM used/total
 - GPU: load %, temp °C, power W, core/mem clocks (via NVML on NVIDIA;

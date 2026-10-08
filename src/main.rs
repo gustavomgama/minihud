@@ -24,6 +24,11 @@ fn main() -> Result<()> {
     let args = parse_args();
     let cfg = Config::load();
     tracing::info!("config at {:?}: {:?}", Config::path(), cfg);
+    tracing::info!(
+        "poll cadence: hw={}ms active/{}ms idle, app=200ms recompute (ETW delivers ~1s batches)",
+        cfg.update_hw_ms,
+        cfg.idle_hw_ms
+    );
     if let Some(f) = &args.process {
         tracing::info!("process filter: {}", f.label());
     }
@@ -79,12 +84,6 @@ fn main() -> Result<()> {
     if brushes.is_none() {
         tracing::warn!("no render target; overlay will be empty");
     }
-    // Displayed (smoothed) readouts. The DATA stays raw; only presentation
-    // lerps toward it (~150ms settle), so digits stop flickering without
-    // hiding real changes. -1.0 = unset, snap on first frame.
-    let mut disp_app_fps = -1.0f32;
-    let mut disp_cpu = -1.0f32;
-    let mut disp_gpu = -1.0f32;
     // Last device-recovery attempt (throttled: retry every 2s, not per frame).
     let mut last_recover: Option<std::time::Instant> = None;
     // 'run: the WM_QUIT arm below sits inside the message-pump `while`,
@@ -188,20 +187,14 @@ fn main() -> Result<()> {
             // RTSS-style vertical stack, label|value columns. "--"
             // wherever the game is silent; layout never shifts.
             let app = apps.top(self_pid, args.process.as_ref());
-            // Displayed readouts lerp toward raw data (~150ms settle):
-            // calm digits, same truth. Snap on first sight.
-            let app_fps_raw = app.as_ref().map(|a| a.fps).unwrap_or(-1.0);
-            if app_fps_raw < 0.0 {
-                disp_app_fps = -1.0;
-            }
-            let app_fps = smooth(&mut disp_app_fps, app_fps_raw.max(0.0));
-            let cpu_txt = smooth(&mut disp_cpu, stats.cpu_percent.max(0.0));
-            let gpu_raw = stats.gpu_percent.unwrap_or(-1.0);
-            let gpu_txt = if gpu_raw < 0.0 {
-                disp_gpu = -1.0;
-                "--".to_string()
-            } else {
-                format!("{:3.0} %", smooth(&mut disp_gpu, gpu_raw))
+            // Raw poll values, no per-frame smoothing: digits step
+            // exactly when source data steps (200ms HW / ~1s ETW),
+            // so the perceived rate IS the poll rate.
+            let app_fps = app.as_ref().map(|a| a.fps).unwrap_or(0.0);
+            let cpu_txt = format!("{:3.0} %", stats.cpu_percent.max(0.0));
+            let gpu_txt = match stats.gpu_percent {
+                Some(g) => format!("{:3.0} %", g.max(0.0)),
+                None => "--".to_string(),
             };
             // Threshold tint on the headline number only; every value
             // keeps its digits (never color-only meaning). Resolved
@@ -262,7 +255,7 @@ fn main() -> Result<()> {
                 avg_t.clone(),
                 max_t.clone(),
                 low_t.clone(),
-                format!("{cpu_txt:3.0} %"),
+                cpu_txt,
                 opt_u32(stats.cpu_mhz, "MHz"),
                 mem_txt(stats.ram_used_mb, stats.ram_total_mb),
                 gpu_txt.clone(),
@@ -409,19 +402,6 @@ fn opt_f32(v: Option<f32>, unit: &str, decimals: usize) -> String {
         Some(x) => format!("{x:.decimals$} {unit}"),
         None => "--".to_string(),
     }
-}
-
-/// Displayed readout lerps toward the raw value (~150ms settle at
-/// 60fps+). Calms flickering digits without hiding real changes;
-/// -1.0 means unset (snap on first sight). Presentation-only: the
-/// underlying data is never smoothed.
-fn smooth(current: &mut f32, target: f32) -> f32 {
-    if *current < 0.0 || !target.is_finite() {
-        *current = target.max(0.0);
-    } else {
-        *current += (target - *current) * 0.2;
-    }
-    *current
 }
 
 /// "6.34 ms", or "--" when there is no data (infinite/NaN).
