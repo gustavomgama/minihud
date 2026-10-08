@@ -370,6 +370,9 @@ fn main() -> Result<()> {
                 }
             }
         }
+        // Heartbeat, not a poll rate: 8ms keeps hotkeys/quit snappy,
+        // 30ms when frames are skipped (render-on-demand idle).
+        // Data cadence lives in HwPoller (adaptive) and TOP_TTL (200ms).
         std::thread::sleep(std::time::Duration::from_millis(if drew { 8 } else { 30 }));
     }
     // Clean exit: stop the ETW session so no kernel trace lingers, then

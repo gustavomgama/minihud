@@ -4,11 +4,11 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// Recompute cadence: fast while a game is tracked (ETW-bound anyway),
-/// relaxed while listening. The lock holds are microseconds either way;
-/// this just stops burning cycles watching silence.
-const TOP_TTL_ACTIVE: Duration = Duration::from_millis(50);
-const TOP_TTL_IDLE: Duration = Duration::from_millis(250);
+/// Recompute cadence, global default: 200ms. The lock holds are
+/// microseconds and ETW delivery is ~1s-batched anyway, so recomputing
+/// faster just re-reads identical data; slower makes the HUD feel
+/// dead next to 200ms HW rows. Single value, no active/idle split.
+const TOP_TTL: Duration = Duration::from_millis(200);
 
 /// One present-producing process, ranked by recent present rate.
 #[derive(Clone, Debug)]
@@ -108,7 +108,7 @@ impl AppTracker {
     pub fn start() -> Self {
         let tracker = Self {
             state: Arc::new(Mutex::new(State::default())),
-            cache: Arc::new(Mutex::new((Instant::now() - TOP_TTL_IDLE, None))),
+            cache: Arc::new(Mutex::new((Instant::now() - TOP_TTL, None))),
             incumbent: Arc::new(Mutex::new(None)),
         };
         let state = tracker.state.clone();
@@ -122,15 +122,8 @@ impl AppTracker {
     /// Result is cached for 500ms so per-frame HUD reads don't contend
     /// with the ETW delivery thread.
     pub fn top(&self, exclude_pid: u32, filter: Option<&ProcessFilter>) -> Option<AppFrame> {
-        // Dynamic TTL from the last outcome: fast while tracking,
-        // relaxed while listening.
         if let Ok(cache) = self.cache.lock() {
-            let ttl = if cache.1.is_some() {
-                TOP_TTL_ACTIVE
-            } else {
-                TOP_TTL_IDLE
-            };
-            if cache.0.elapsed() < ttl {
+            if cache.0.elapsed() < TOP_TTL {
                 return cache.1.clone();
             }
         }
