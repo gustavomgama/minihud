@@ -256,6 +256,39 @@ impl AppTracker {
         })
     }
 
+    /// Top presenters in the last second as (name, pid, count), up to 4,
+    /// including ourselves. For logs only: settles "who is actually
+    /// presenting" arguments that the single APP row can't.
+    pub fn snapshot(&self) -> Vec<(String, u32, usize)> {
+        let mut st = match self.state.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        let now = qpc_now();
+        let win_from = now - qpc_freq();
+        let mut rows: Vec<(String, u32, usize)> = Vec::new();
+        let pids: Vec<u32> = st.events.keys().copied().collect();
+        for pid in pids {
+            let n = st
+                .events
+                .get(&pid)
+                .map(|q| q.iter().filter(|t| **t >= win_from).count())
+                .unwrap_or(0);
+            if n == 0 {
+                continue;
+            }
+            let name = st.names.get(&pid).cloned().unwrap_or_else(|| {
+                let n = process_name(pid).unwrap_or_else(|| format!("pid {pid}"));
+                st.names.insert(pid, n.clone());
+                n
+            });
+            rows.push((name, pid, n));
+        }
+        rows.sort_by(|a, b| b.2.cmp(&a.2));
+        rows.truncate(4);
+        rows
+    }
+
     /// Placeholder line when no app data yet: "APP  -- (run as admin)" etc.
     /// With a process filter the placeholder names the target so a silent
     /// game is distinguishable from a dead session.

@@ -94,8 +94,14 @@ fn main() -> Result<()> {
                 None => apps.status_text(args.process.as_ref()),
             };
             let (etw_start, etw_stop) = appstats::etw::seen();
+            let snap = apps
+                .snapshot()
+                .iter()
+                .map(|(n, _, c)| format!("{n}:{c}"))
+                .collect::<Vec<_>>()
+                .join(",");
             tracing::info!(
-                "frame {frames}: fps={:.0} avg_ms={:.2} cpu={:.0}% ram={}/{}MB vram={}/{}MB gpu={:?} app=[{app_txt}] etw_dropped={} etw_start={etw_start} etw_stop={etw_stop}",
+                "frame {frames}: fps={:.0} avg_ms={:.2} cpu={:.0}% ram={}/{}MB vram={}/{}MB gpu={:?} app=[{app_txt}] etw_dropped={} etw_start={etw_start} etw_stop={etw_stop} pids=[{snap}]",
                 s.fps,
                 s.avg_ms,
                 stats.cpu_percent,
