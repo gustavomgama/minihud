@@ -26,6 +26,7 @@ pub struct Overlay {
     pub dwrite: IDWriteFactory,
     pub rt: Option<ID2D1HwndRenderTarget>,
     pub text_fmt: Option<IDWriteTextFormat>,
+    interactive: std::sync::atomic::AtomicBool,
 }
 
 fn wstr(s: &str) -> Vec<u16> {
@@ -88,6 +89,7 @@ impl Overlay {
             dwrite,
             rt: None,
             text_fmt: None,
+            interactive: std::sync::atomic::AtomicBool::new(false),
         };
         ov.create_resources(w, h, font_size)?;
         unsafe {
@@ -140,6 +142,8 @@ impl Overlay {
     }
 
     pub fn set_click_through(&self, enable: bool) {
+        use std::sync::atomic::Ordering;
+        self.interactive.store(!enable, Ordering::Relaxed);
         unsafe {
             let ex = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) as u32;
             let transparent = WS_EX_TRANSPARENT.0 as u32;
@@ -158,6 +162,14 @@ impl Overlay {
                 0,
                 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+            let applied = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) as u32;
+            tracing::info!(
+                "click-through {}: exstyle {:#x} -> {:#x} (now {:#x})",
+                if enable { "on" } else { "off" },
+                ex,
+                new_ex,
+                applied,
             );
         }
     }
@@ -184,14 +196,22 @@ impl Overlay {
     }
 
     pub fn begin_draw(&self) {
+        use std::sync::atomic::Ordering;
+        // Visible feedback: lighter background while interactive (F8 off),
+        // so the F8 state is observable before drag support lands.
+        let bg = if self.interactive.load(Ordering::Relaxed) {
+            0.10
+        } else {
+            0.02
+        };
         if let Some(rt) = &self.rt {
             unsafe {
                 rt.BeginDraw();
                 rt.Clear(Some(
                     &windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F {
-                        r: 0.02,
-                        g: 0.02,
-                        b: 0.02,
+                        r: bg,
+                        g: bg,
+                        b: bg,
                         a: 1.0,
                     },
                 ));
