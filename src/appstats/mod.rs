@@ -4,11 +4,11 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// Recompute cadence, dynamic by outcome: 100ms while a game is
-/// tracked (numbers stay live), 1000ms while listening (ETW delivers
-/// ~1s batches anyway, so faster re-reads just spin). Lock holds are
-/// microseconds either way; this only sets display freshness.
-const TOP_TTL_ACTIVE: Duration = Duration::from_millis(100);
+/// Recompute cadence, dynamic by outcome: 50ms minimum while a game
+/// is tracked, 1000ms while listening (ETW delivers ~1s batches
+/// anyway, so faster re-reads just spin). Lock holds are microseconds
+/// either way; this only sets display freshness.
+const TOP_TTL_ACTIVE: Duration = Duration::from_millis(50);
 const TOP_TTL_IDLE: Duration = Duration::from_millis(1000);
 
 /// One present-producing process, ranked by recent present rate.
