@@ -101,7 +101,7 @@ fn main() -> Result<()> {
                 .collect::<Vec<_>>()
                 .join(",");
             tracing::info!(
-                "frame {frames}: fps={:.0} avg_ms={:.2} cpu={:.0}% ram={}/{}MB vram={}/{}MB gpu={:?} app=[{app_txt}] etw_dropped={} etw_start={etw_start} etw_stop={etw_stop} pids=[{snap}]",
+                "frame {frames}: fps={:.0} avg_ms={:.2} cpu={:.0}% ram={}/{}MB vram={}/{}MB gpu={:?} app=[{app_txt}] etw_dropped={} etw_start={etw_start} etw_stop={etw_stop} pids=[{snap}] lagmax={}ms",
                 s.fps,
                 s.avg_ms,
                 stats.cpu_percent,
@@ -111,6 +111,7 @@ fn main() -> Result<()> {
                 stats.gpu_vram_total_mb,
                 stats.gpu_percent,
                 appstats::etw::dropped(),
+                appstats::etw::max_lag_ms(),
             );
         }
         if visible {

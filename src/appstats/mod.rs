@@ -29,6 +29,11 @@ struct State {
     names: HashMap<u32, String>,
     /// ETW session failed (e.g. not elevated). Shown in HUD as placeholder.
     session_err: Option<String>,
+    /// Newest event timestamp seen. Windows are relative to this
+    /// watermark, not to wall-clock QPC: real-time delivery can lag
+    /// seconds behind (observed 2.3s), which empties wall-clock windows
+    /// even while totals climb. Watermark windows stay correct.
+    max_stamp: i64,
 }
 
 fn qpc_freq() -> i64 {
@@ -45,15 +50,6 @@ fn qpc_freq() -> i64 {
             f
         }
     })
-}
-
-fn qpc_now() -> i64 {
-    use windows::Win32::System::Performance::QueryPerformanceCounter;
-    let mut t = 0i64;
-    unsafe {
-        let _ = QueryPerformanceCounter(&mut t);
-    }
-    t
 }
 
 /// CLI process target: `--process Overwatch.exe` or `--process 1234`.
@@ -151,10 +147,16 @@ impl AppTracker {
 
     fn compute_top(&self, exclude_pid: u32, filter: Option<&ProcessFilter>) -> Option<AppFrame> {
         let mut st = self.state.lock().ok()?;
+        // Windows relative to the newest event seen, not wall clock:
+        // delivery can lag seconds, which would empty wall-clock windows
+        // even while totals climb.
+        let mark = st.max_stamp;
+        if mark <= 0 {
+            return None;
+        }
         let freq = qpc_freq() as f64;
-        let now = qpc_now();
-        let keep_from = now - 2 * qpc_freq();
-        let win_from = now - qpc_freq();
+        let keep_from = mark - 2 * qpc_freq();
+        let win_from = mark - qpc_freq();
         let mut best: Option<(u32, usize)> = None;
         // Prune + rank. Single pass; map is tiny (one entry per presenter).
         // Reborrow through the guard once so `events`/`names` are
@@ -264,8 +266,11 @@ impl AppTracker {
             Ok(g) => g,
             Err(_) => return Vec::new(),
         };
-        let now = qpc_now();
-        let win_from = now - qpc_freq();
+        let mark = st.max_stamp;
+        if mark <= 0 {
+            return Vec::new();
+        }
+        let win_from = mark - qpc_freq();
         let mut rows: Vec<(String, u32, usize)> = Vec::new();
         let pids: Vec<u32> = st.events.keys().copied().collect();
         for pid in pids {

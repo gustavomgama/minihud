@@ -59,13 +59,45 @@ pub fn seen() -> (u64, u64) {
     )
 }
 
-/// Events seen per DXGI present opcode, for diagnostics.
-static SEEN_START: AtomicU64 = AtomicU64::new(0);
-static SEEN_STOP: AtomicU64 = AtomicU64::new(0);
+/// Worst delivery lag seen: now-QPC minus event QPC at arrival, in ms.
+/// Real-time ETW can deliver buffers late; if this exceeds ~1000ms,
+/// in-window counts collapse even while totals climb — the signature
+/// of lag, not of a quiet game.
+static MAX_LAG_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Worst observed ETW delivery lag in milliseconds, for diagnostics.
+pub fn max_lag_ms() -> u64 {
+    MAX_LAG_MS.load(Ordering::Relaxed)
+}
+
+fn note_lag(stamp_qpc: i64) {
+    use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+    unsafe {
+        let (mut now, mut freq) = (0i64, 0i64);
+        if QueryPerformanceCounter(&mut now).is_err()
+            || QueryPerformanceFrequency(&mut freq).is_err()
+            || freq <= 0
+        {
+            return;
+        }
+        let lag_ms = (now - stamp_qpc).max(0) * 1000 / freq;
+        let _ = MAX_LAG_MS.try_update(Ordering::Relaxed, Ordering::Relaxed, |m| {
+            if (lag_ms as u64) > m {
+                Some(lag_ms as u64)
+            } else {
+                None
+            }
+        });
+    }
+}
 
 fn wide_nul(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
+
+/// Events seen per DXGI present opcode, for diagnostics.
+static SEEN_START: AtomicU64 = AtomicU64::new(0);
+static SEEN_STOP: AtomicU64 = AtomicU64::new(0);
 
 fn set_err(state: &Arc<Mutex<State>>, e: impl Into<String>) {
     if let Ok(mut st) = state.lock() {
@@ -102,6 +134,11 @@ unsafe fn run_inner(state: &Arc<Mutex<State>>) {
     (*props).Wnode.Flags = WNODE_FLAG_TRACED_GUID;
     (*props).Wnode.Guid = SESSION_GUID;
     (*props).LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
+    // Mirror PresentMon's buffering (defaults starve under game bursts).
+    (*props).BufferSize = 64; // KB per buffer
+    (*props).MinimumBuffers = 256;
+    (*props).MaximumBuffers = 1024;
+    (*props).FlushTimer = 1; // seconds; bound delivery lag explicitly
     (*props).LoggerNameOffset = std::mem::size_of::<EVENT_TRACE_PROPERTIES>() as u32;
     std::ptr::copy_nonoverlapping(
         name.as_ptr(),
@@ -195,6 +232,7 @@ unsafe extern "system" fn event_callback(record: *mut EVENT_RECORD) {
     let id = r.EventHeader.EventDescriptor.Id;
     if id == PRESENT_START_ID || id == MPO_START_ID {
         SEEN_START.fetch_add(1, Ordering::Relaxed);
+        note_lag(r.EventHeader.TimeStamp);
     } else if id == PRESENT_STOP_ID || id == MPO_STOP_ID {
         SEEN_STOP.fetch_add(1, Ordering::Relaxed);
         return;
@@ -215,8 +253,10 @@ unsafe extern "system" fn event_callback(record: *mut EVENT_RECORD) {
         Ok(mut st) => {
             // Store the event's QPC timestamp, not arrival time: real-time
             // delivery batches events, so arrivals cluster and fake a 0ms avg.
+            let stamp = r.EventHeader.TimeStamp;
+            st.max_stamp = st.max_stamp.max(stamp);
             let q = st.events.entry(pid).or_insert_with(VecDeque::new);
-            q.push_back(r.EventHeader.TimeStamp);
+            q.push_back(stamp);
             while q.len() > MAX_QUEUE {
                 q.pop_front();
             }
