@@ -26,9 +26,12 @@ pub struct LhmSensor {
     pub value: f64,
 }
 
+/// Shared latest-sample slot: `(timestamp, sensors)` behind a mutex.
+type LhmLatest = Arc<Mutex<Option<(Instant, Vec<LhmSensor>)>>>;
+
 #[derive(Clone)]
 pub struct LhmFeed {
-    latest: Arc<Mutex<Option<(Instant, Vec<LhmSensor>)>>>,
+    latest: LhmLatest,
 }
 
 impl LhmFeed {
@@ -51,7 +54,7 @@ impl LhmFeed {
         }
     }
 
-    fn run(slot: Arc<Mutex<Option<(Instant, Vec<LhmSensor>)>>>) {
+    fn run(slot: LhmLatest) {
         loop {
             if let Err(e) = Self::session(&slot) {
                 tracing::warn!("lhm bridge: {e}; retry in 5s");
@@ -60,7 +63,7 @@ impl LhmFeed {
         }
     }
 
-    fn session(slot: &Arc<Mutex<Option<(Instant, Vec<LhmSensor>)>>>) -> Result<(), String> {
+    fn session(slot: &LhmLatest) -> Result<(), String> {
         let (dll, script) = paths().ok_or_else(|| {
             "LibreHardwareMonitorLib.dll / lhm-bridge.ps1 not found (see README)".to_string()
         })?;
@@ -107,6 +110,7 @@ impl LhmFeed {
             }
             match serde_json::from_str::<Vec<LhmSensor>>(&line) {
                 Ok(sensors) => {
+                    tracing::debug!("lhm sensors: count={}", sensors.len());
                     if let Ok(mut g) = slot.lock() {
                         *g = Some((Instant::now(), sensors));
                     }
@@ -120,21 +124,14 @@ impl LhmFeed {
     }
 }
 
-/// DLL + script next to the exe (release), else the repo tools dir (dev).
+/// DLL + script live next to the exe in every profile. `cargo xtask build`
+/// stages them there; there is no build-time / manifest-dir fallback, so
+/// debug and release resolve assets identically.
 fn paths() -> Option<(PathBuf, PathBuf)> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?.to_path_buf();
     let find = |name: &str| -> Option<PathBuf> {
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                let p = dir.join(name);
-                if p.exists() {
-                    return Some(p);
-                }
-            }
-        }
-        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tools")
-            .join("lhm")
-            .join(name);
+        let p = dir.join(name);
         p.exists().then_some(p)
     };
     Some((
@@ -147,6 +144,7 @@ fn paths() -> Option<(PathBuf, PathBuf)> {
 /// absent leaves the field for the legacy fallbacks. LHM is the ONLY
 /// source for CPU temp/power (no user-mode alternative exists).
 pub fn apply(sensors: &[LhmSensor], stats: &mut super::HwStats) {
+    tracing::debug!("lhm apply: {} sensors", sensors.len());
     let find = |hw_prefix: &str, ty: &str, names: &[&str]| -> Option<f64> {
         for n in names {
             if let Some(s) = sensors
@@ -171,12 +169,30 @@ pub fn apply(sensors: &[LhmSensor], stats: &mut super::HwStats) {
     if let Some(v) = find("Cpu:", "Power", &["Package", "CPU Package"]) {
         stats.cpu_power_w = Some(v as f32);
     }
+    if let Some(v) = find(
+        "Cpu:",
+        "Clock",
+        &["Cores (Average)", "CPU Core", "Core #1", "Core ("],
+    ) {
+        stats.cpu_clock_mhz = Some(v as u32);
+    }
     // LHM reports memory in GB; everything downstream is MB.
     let mem_used = find("Memory:", "Data", &["Memory Used", "Used Memory"]);
     let mem_avail = find("Memory:", "Data", &["Memory Available", "Available Memory"]);
     if let (Some(u), Some(a)) = (mem_used, mem_avail) {
         stats.ram_used_mb = Some((u * 1024.0) as u64);
         stats.ram_total_mb = Some(((u + a) * 1024.0) as u64);
+    }
+    // Extract CPU/GPU names from the first matching hardware block.
+    if let Some(cpu_s) = sensors.iter().find(|s| s.hw.starts_with("Cpu:")) {
+        if let Some((_, name)) = cpu_s.hw.split_once(':') {
+            stats.cpu_name = Some(name.trim().to_string());
+        }
+    }
+    if let Some(gpu_s) = sensors.iter().find(|s| s.hw.starts_with("Gpu")) {
+        if let Some((_, name)) = gpu_s.hw.split_once(':') {
+            stats.gpu_name = Some(name.trim().to_string());
+        }
     }
     // First discrete GPU block wins (single-dGPU assumption, documented).
     let gpu_hw = sensors
@@ -210,8 +226,17 @@ pub fn apply(sensors: &[LhmSensor], stats: &mut super::HwStats) {
         if let Some(v) = gfind("Clock", &["GPU Memory"]) {
             stats.gpu_mem_mhz = Some(v as u32);
         }
+        if let Some(v) = gfind("Voltage", &["GPU Core", "GPU Voltage"]) {
+            stats.gpu_voltage_mv = Some(v as u32);
+        }
+        if let Some(v) = gfind("SmallData", &["D3D Dedicated Memory Used"]) {
+            stats.gpu_d3d_dedicated_mb = Some(v as u64);
+        }
         let used = gfind("SmallData", &["GPU Memory Used"]);
         let total = gfind("SmallData", &["GPU Memory Total"]);
+        if let Some(v) = used {
+            stats.gpu_mem_used_mb = Some(v as u64);
+        }
         if let (Some(u), Some(t)) = (used, total) {
             if t > 0.0 {
                 stats.gpu_vram_used_mb = Some(u as u64);

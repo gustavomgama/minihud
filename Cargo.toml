@@ -1,12 +1,12 @@
 [workspace]
-members = [".", "crates/hook-ipc", "crates/hook-rt", "crates/hook-host", "crates/hook-test"]
+members = [".", "xtask"]
 
 [package]
 name = "minihud"
 version = "0.1.0"
 edition = "2021"
 authors = ["minihud"]
-description = "Minimal Windows performance overlay"
+description = "Headless LibreHardwareMonitor hardware-stats backend for Windows"
 license = "MIT"
 repository = "https://github.com/helmet/minihud"
 readme = "README.md"
@@ -15,19 +15,18 @@ readme = "README.md"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 serde = { version = "1", features = ["derive"] }
-toml = "0.9"
 serde_json = "1"
 
 [dependencies.windows]
 version = "0.61"
 features = [
   "Win32_Foundation",
+  "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
-  "Win32_UI_Input_KeyboardAndMouse",
-  "Win32_Graphics_Direct2D",
-  "Win32_Graphics_Direct2D_Common",
-  "Win32_Graphics_DirectWrite",
-  "Win32_Graphics_Dxgi_Common",
-  "Win32_Graphics_Gdi",
-  "Win32_System_LibraryLoader",
 ]
+
+# Behavior-neutral release tuning only. Panic strategy is intentionally left
+# at the default so debug and release fail identically.
+[profile.release]
+strip = true
+lto = "thin"

@@ -1,45 +1,56 @@
 # minihud
 
-Minimal Windows hardware overlay. System stats only, no per-app tracking.
-Rust + `windows-rs` + Direct2D. One data source: LibreHardwareMonitor.
+A **headless hardware-stats backend for Windows**, sourced entirely from
+[LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) (LHM).
 
-## Shows ("--" wherever no data exists)
+minihud polls CPU / GPU / RAM sensors and prints them on an interval. There is
+no UI, no overlay, no framerate capture, no injection, and no application
+detection — just the LHM hardware integration. Anything LHM does not report
+prints as `--`, never a guess.
 
-- CPU: load %, temp °C, power W, RAM used/total
-- GPU: load %, temp °C, power W, core/mem clocks, VRAM used/total
-- Two-tier text (dim labels, bright values); digits step exactly when
-  source data steps
+```
+CPU 12% 55C 45W 4200MHz | RAM 8192/16384MB | GPU 30% 60C 120W 1800x7000MHz | VRAM 4096/8192MB [AMD Ryzen 7 5800X / NVIDIA GeForce RTX 3070]
+```
 
-## Keys
+## What it collects
 
-- F7: show/hide overlay
-- F8: click-through on/off. With it OFF, drag the overlay anywhere
-  with the left mouse button; position is saved next to the exe.
-- Shift+F7: clean quit
+| Group | Fields (all optional except CPU load) |
+|-------|----------------------------------------|
+| CPU | load %, temperature, package power, average clock, name |
+| RAM | used / total (MB) |
+| GPU | load %, temperature, power, core / memory clock, core voltage, VRAM used / total, D3D-dedicated memory, name |
 
-## Config
+LHM is the only data source: CPU temperature and package power have no usable
+user-mode alternative, so no fallback backends exist.
 
-`minihud.toml` next to the exe (position, text size, opacity for text,
-hw poll interval, click-through default). Any listed key overrides its
-default; unknown keys are ignored.
-
-Cadence is adaptive with a 50ms floor, not fixed: HW polls at
-`update_hw_ms` (default 50) while values move and backs off toward
-`idle_hw_ms` (default 2000) when quiet; frames only present when the
-pixels would differ. The frame log shows live `hwms=` and
-skipped-frame counts. Deliberate exceptions: the 8/30ms main-loop
-heartbeat (hotkey latency, costs nothing when skipping) and the 2s
-device-recovery timer (recovery path, not a data rate).
-
-## Hardware backend: LibreHardwareMonitor (only)
+## How it works
 
 LHM is .NET-only, so a persistent PowerShell sidecar
-(`tools/lhm/lhm-bridge.ps1`) hosts `LibreHardwareMonitorLib.dll` and
-emits one JSON sensor dump per poll. Rust reads it on a dedicated
-thread — the main loop never blocks on it. There are no fallback
-backends: anything LHM lacks shows `--`, never a guess.
+(`tools/lhm/lhm-bridge.ps1`) hosts `LibreHardwareMonitorLib.dll` and emits one
+JSON sensor dump per poll. Rust reads it on a dedicated thread — the main loop
+never blocks on it and keeps the last good sample until it goes stale.
 
-One-time DLL fetch (gitignored, ~700KB, pinned 0.9.4):
+```text
+powershell  lhm-bridge.ps1  ->  LhmFeed (thread)  ->  HwPoller  ->  stdout
+   |              |
+   |              +-- LibreHardwareMonitorLib.dll
+   +-- stdin "\n" ticks, stdout JSON
+```
+
+The poll cadence is adaptive: fast while values are moving, backing off when
+they settle (see `ACTIVE_MS` / `IDLE_MS` in `src/main.rs`).
+
+## Requirements
+
+- Windows 10/11
+- Rust (MSVC toolchain)
+- **.NET Framework 4.7.2** (for the LHM DLL, already present on most Windows installs)
+- Administrator rights for full CPU temperature/power (SuperIO). The exe
+  self-elevates at runtime; `MINIHUD_NO_ELEVATE=1` skips it.
+
+## One-time DLL fetch
+
+The LHM assembly is gitignored (~700 KB), pinned to 0.9.4:
 
 ```powershell
 curl -L "https://www.nuget.org/api/v2/package/LibreHardwareMonitorLib/0.9.4" -o lhm.zip
@@ -47,14 +58,38 @@ Expand-Archive lhm.zip lhm-pkg
 Copy-Item lhm-pkg\lib\net472\LibreHardwareMonitorLib.dll tools\lhm\
 ```
 
-For runs outside cargo, copy `tools\lhm\lhm-bridge.ps1` and the DLL
-next to `minihud.exe`. Without them every row reads `--`.
+Without it the exe runs but every hardware value reads `--`.
 
-## Notes
+## Build & run
 
-- No per-app frame/FPS/frametime tracking: the only external sources
-  on Windows are ETW present events and API hooking (injection,
-  anti-cheat consequences). Neither ships here by decision.
-- Core voltage (mV) has no readable source (no NVML API, LHM SuperIO
-  absent on most boards) and is omitted, not faked.
-- Window is opaque for now; true per-pixel alpha is a future milestone.
+```powershell
+cargo xtask build            # build + stage assets next to target/debug/minihud.exe
+cargo xtask run              # build + stage, then run
+cargo xtask build --release
+cargo xtask dist             # assemble a shippable folder in dist/
+cargo xtask clean            # clean target/ and dist/
+```
+
+`cargo build` / `cargo build --release` also work, but `cargo xtask build` is
+what stages `lhm-bridge.ps1` and `LibreHardwareMonitorLib.dll` next to the exe
+so it can find them — assets are always resolved from the exe's own directory.
+
+## Output
+
+`minihud.exe` prints one text line per hardware poll. Stop it with Ctrl+C.
+There is no config file; cadence is compiled in.
+
+## Project layout
+
+```
+src/main.rs          entry point: elevation + poll loop + text output
+src/hw/lhm.rs        LHM sidecar feed (spawns the bridge, parses JSON, applies)
+src/hw/sensors.rs    HwStats fields + adaptive HwPoller
+tools/lhm/           lhm-bridge.ps1 + LibreHardwareMonitorLib.dll
+xtask/               build/run/dist/clean helper
+build.rs, minihud.manifest   elevation / DPI manifest embedding
+```
+
+## License
+
+MIT.

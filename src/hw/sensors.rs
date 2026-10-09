@@ -1,7 +1,6 @@
-//! The ONLY hardware data path: LibreHardwareMonitor.
-//! PDH, NVML, DXGI VRAM, CallNt clocks and GlobalMemoryStatus are gone by
-//! decision. Anything LHM lacks shows "--", never a guess. Unknown keys
-//! in old configs are ignored, so this removal breaks no toml files.
+//! Hardware stats sampled from LibreHardwareMonitor — the only external
+//! hardware data source. Anything missing is `None` and prints as `--`,
+//! never a guess.
 
 use std::time::{Duration, Instant};
 
@@ -10,6 +9,7 @@ pub struct HwStats {
     pub cpu_percent: f32,
     pub cpu_temp_c: Option<f32>,
     pub cpu_power_w: Option<f32>,
+    pub cpu_clock_mhz: Option<u32>,
     pub ram_used_mb: Option<u64>,
     pub ram_total_mb: Option<u64>,
     pub gpu_percent: Option<f32>,
@@ -19,13 +19,16 @@ pub struct HwStats {
     pub gpu_mem_mhz: Option<u32>,
     pub gpu_vram_used_mb: Option<u64>,
     pub gpu_vram_total_mb: Option<u64>,
-    // Per-app frame stats (additive, non-blocking, independent of LHM)
-    pub app_fps: Option<u32>,
-    pub app_avg_ms: Option<f32>,
-    pub app_frames: Option<u64>,
-    pub app_pid: Option<u32>,
+    pub gpu_mem_used_mb: Option<u64>,
+    pub gpu_d3d_dedicated_mb: Option<u64>,
+    pub gpu_voltage_mv: Option<u32>,
+    pub cpu_name: Option<String>,
+    pub gpu_name: Option<String>,
 }
 
+/// Polls the LHM bridge on an adaptive hardware cadence: anything changing
+/// beyond noise resets to the active rate; 4 quiet polls in a row double the
+/// interval up to the idle cap.
 pub struct HwPoller {
     last: Instant,
     active: Duration,
@@ -33,10 +36,8 @@ pub struct HwPoller {
     next: Duration,
     stable_polls: u8,
     lhm: super::lhm::LhmFeed,
-    hook: super::hook::HookFeed,
     cached: HwStats,
     prev: Option<HwStats>,
-    sampled: bool,
 }
 
 impl HwPoller {
@@ -49,18 +50,12 @@ impl HwPoller {
             active,
             idle: Duration::from_millis(idle_ms.max(active_ms.max(1))),
             lhm: super::lhm::LhmFeed::start(),
-            hook: super::hook::HookFeed::start(),
             cached: HwStats::default(),
             prev: None,
-            sampled: false,
         }
     }
 
-    /// Poll when due. Adaptive cadence: anything changing beyond noise
-    /// resets to the active rate (floor: the configured minimum);
-    /// 4 quiet polls in a row double the interval up to the idle cap.
-    /// Returns Some on every poll; use `ready()` to know whether any
-    /// real sample has landed yet (LHM bridge takes seconds to warm up).
+    /// Poll when due. Returns the current stats on a due poll, else `None`.
     pub fn update(&mut self) -> Option<HwStats> {
         if self.last.elapsed() < self.next {
             return None;
@@ -68,16 +63,6 @@ impl HwPoller {
         self.last = Instant::now();
         if let Some(sensors) = self.lhm.latest(Duration::from_secs(3)) {
             super::lhm::apply(&sensors, &mut self.cached);
-            self.sampled = true;
-        }
-        // Additive per-app frame data: independent, never blocks, fail-open.
-        if let Some(stats) = self.hook.latest(Duration::from_millis(1000)) {
-            if let Some(s) = stats.first() {
-                self.cached.app_fps = Some(s.fps);
-                self.cached.app_avg_ms = Some(s.avg_ms);
-                self.cached.app_frames = Some(s.frames);
-                self.cached.app_pid = Some(s.pid);
-            }
         }
         if self.changed_since_last() {
             self.next = self.active;
@@ -93,19 +78,8 @@ impl HwPoller {
         Some(self.cached.clone())
     }
 
-    /// True once at least one LHM sample has been applied. Before that
-    /// every row reads "--" instead of startup zeros.
-    pub fn ready(&self) -> bool {
-        self.sampled
-    }
-
     pub fn cached(&self) -> &HwStats {
         &self.cached
-    }
-
-    /// Current poll interval (for logs): active when moving, up to idle.
-    pub fn interval_ms(&self) -> u64 {
-        self.next.as_millis() as u64
     }
 
     /// True when the latest poll moved anything beyond idle noise.
@@ -122,6 +96,7 @@ impl HwPoller {
             || opt_changed(c.cpu_power_w, p.cpu_power_w, 1.0)
             || c.gpu_core_mhz != p.gpu_core_mhz
             || c.gpu_mem_mhz != p.gpu_mem_mhz
+            || c.cpu_clock_mhz != p.cpu_clock_mhz
             || opt_u64_changed(c.gpu_vram_used_mb, p.gpu_vram_used_mb, 32)
     }
 }

@@ -1,4 +1,7 @@
 /target
-
+/dist/
 *.dll
 minihud.toml
+/coverage-report/
+*.profraw
+.opencode/opencode-loop/
