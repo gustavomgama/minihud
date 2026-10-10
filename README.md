@@ -82,13 +82,44 @@ There is no config file; cadence is compiled in.
 ## Project layout
 
 ```
-src/main.rs          entry point: elevation + poll loop + text output
+src/main.rs          entry point: elevation + poll loop
+src/render.rs        text rendering of one HwStats sample (pure, tested)
 src/hw/lhm.rs        LHM sidecar feed (spawns the bridge, parses JSON, applies)
-src/hw/sensors.rs    HwStats fields + adaptive HwPoller
+src/hw/sensors.rs    HwStats fields + adaptive HwPoller + noise thresholds
 tools/lhm/           lhm-bridge.ps1 + LibreHardwareMonitorLib.dll
 xtask/               build/run/dist/clean helper
+deny.toml            cargo-deny license/source policy
 build.rs, minihud.manifest   elevation / DPI manifest embedding
 ```
+
+## Development
+
+This project is **test-driven** (see `AGENTS.md`): write a failing test first,
+watch it fail for the right reason, then the minimal code to pass.
+
+Definition of done — all must pass:
+
+```sh
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo nextest run --workspace
+```
+
+Tooling used here: `cargo-nextest` (test runner), `bacon` (watch/rebuild),
+`cargo-deny` (`deny.toml`) and `cargo-audit` (dependency health),
+`cargo-llvm-cov` (coverage), `cargo-mutants`, `cargo-expand`, `cargo-machete`,
+and `rust-analyzer` (LSP + MCP). `src/render.rs` is fully covered; the LHM
+sidecar I/O and the entry point are exercised by running the binary.
+
+### Code quality ("critic")
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/critic.ps1   # gate
+```
+
+Runs coverage (`cargo-llvm-cov`), CRAP (`cargo-crap --fail-above 30`),
+duplication (`jscpd --threshold 5`), and advisory `rustqual` / `mete` reports.
+Non-destructive (writes `lcov.info` + `target/`).
 
 ## License
 

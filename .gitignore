@@ -4,4 +4,6 @@
 minihud.toml
 /coverage-report/
 *.profraw
+lcov.info
+/report/
 .opencode/opencode-loop/

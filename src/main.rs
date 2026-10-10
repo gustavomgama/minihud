@@ -5,10 +5,10 @@
 //! application detection.
 
 mod hw;
+mod render;
 
 use std::time::Duration;
 
-use hw::HwStats;
 use windows::core::{Result, PCWSTR};
 use windows::Win32::UI::Shell::{IsUserAnAdmin, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -17,6 +17,8 @@ use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 /// they settle (see `HwPoller`).
 const ACTIVE_MS: u64 = 200;
 const IDLE_MS: u64 = 1000;
+/// How often the loop wakes to check whether a poll is due.
+const POLL_SLEEP_MS: u64 = 50;
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
@@ -29,62 +31,9 @@ fn main() -> Result<()> {
     let mut poller = hw::HwPoller::new(ACTIVE_MS, IDLE_MS);
     loop {
         if poller.update().is_some() {
-            println!("{}", line(poller.cached()));
+            println!("{}", render::line(poller.cached()));
         }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-/// One hardware sample, formatted as a single text line. Missing values
-/// print as `--`.
-fn line(s: &HwStats) -> String {
-    format!(
-        "CPU {:.0}% {} {} {} | RAM {} | GPU {} {} {} {}x{}MHz | {}{}",
-        s.cpu_percent,
-        f32u(s.cpu_temp_c, "C"),
-        f32u(s.cpu_power_w, "W"),
-        u32u(s.cpu_clock_mhz, "MHz"),
-        ram(s.ram_used_mb, s.ram_total_mb),
-        f32u(s.gpu_percent, "%"),
-        f32u(s.gpu_temp_c, "C"),
-        f32u(s.gpu_power_w, "W"),
-        u32u(s.gpu_core_mhz, ""),
-        u32u(s.gpu_mem_mhz, ""),
-        vram(s),
-        names(s),
-    )
-}
-
-fn f32u(v: Option<f32>, unit: &str) -> String {
-    v.map(|v| format!("{v:.0}{unit}"))
-        .unwrap_or_else(|| "--".to_string())
-}
-
-fn u32u(v: Option<u32>, unit: &str) -> String {
-    v.map(|v| format!("{v}{unit}"))
-        .unwrap_or_else(|| "--".to_string())
-}
-
-fn ram(used: Option<u64>, total: Option<u64>) -> String {
-    match (used, total) {
-        (Some(u), Some(t)) => format!("{u}/{t}MB"),
-        _ => "--".to_string(),
-    }
-}
-
-fn vram(s: &HwStats) -> String {
-    match (s.gpu_vram_used_mb, s.gpu_vram_total_mb) {
-        (Some(u), Some(t)) => format!("VRAM {u}/{t}MB"),
-        _ => "VRAM --".to_string(),
-    }
-}
-
-fn names(s: &HwStats) -> String {
-    match (&s.cpu_name, &s.gpu_name) {
-        (Some(c), Some(g)) => format!("[{c} / {g}]"),
-        (Some(c), None) => format!("[{c}]"),
-        (None, Some(g)) => format!("[{g}]"),
-        (None, None) => String::new(),
+        std::thread::sleep(Duration::from_millis(POLL_SLEEP_MS));
     }
 }
 
@@ -126,4 +75,14 @@ fn wstr(s: &str) -> Vec<u16> {
     let mut v: Vec<u16> = s.encode_utf16().collect();
     v.push(0);
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wstr_is_null_terminated_utf16() {
+        assert_eq!(wstr("ab"), vec![0x61, 0x62, 0x00]);
+    }
 }
