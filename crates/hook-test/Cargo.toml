@@ -1,0 +1,34 @@
+[package]
+name = "hook-test"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "minihud hook validation target: a tiny d3d11/d3d9/d3d12/vulkan/opengl presenter"
+license = "MIT"
+
+[[bin]]
+name = "hook-test"
+path = "src/main.rs"
+
+# `ash` is a test-tool-only dependency: it drives a real Vulkan present path so
+# the `vkQueuePresentKHR` detour has something to observe. The recorder crate
+# (`hook-rt`) and the product deliberately do not depend on it.
+[dependencies]
+ash = "0.38"
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.61"
+features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Direct3D12",
+  "Win32_Graphics_Direct3D9",
+  "Win32_Graphics_DirectComposition",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_Gdi",
+  "Win32_Graphics_OpenGL",
+  "Win32_System_LibraryLoader",
+  "Win32_UI_WindowsAndMessaging",
+]

@@ -1,0 +1,18 @@
+{
+  "file_format_version": "1.0.0",
+  "layer": {
+    "name": "VK_LAYER_MINIHUD_capture",
+    "type": "GLOBAL",
+    "library_path": ".\\hook_vk_layer.dll",
+    "api_version": "1.3.0",
+    "implementation_version": "1",
+    "description": "minihud Vulkan present-frame capture layer: records vkQueuePresentKHR timestamps into the shared frame ring",
+    "functions": {
+      "vkGetInstanceProcAddr": "vkGetInstanceProcAddr",
+      "vkGetDeviceProcAddr": "vkGetDeviceProcAddr"
+    },
+    "disable_environment": {
+      "DISABLE_MINIHUD_VK_LAYER": "1"
+    }
+  }
+}

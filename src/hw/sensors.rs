@@ -4,12 +4,20 @@
 
 use std::time::{Duration, Instant};
 
+use super::apply::apply;
+use super::lhm::{LhmFeed, LhmSensor};
+
 /// Noise thresholds: a field counts as unchanged when it moves by less than
 /// this between polls. Named so the adaptive cadence reads as intent.
 const LOAD_EPS_PCT: f32 = 2.0;
 const TEMP_EPS_C: f32 = 0.5;
 const POWER_EPS_W: f32 = 1.0;
 const MEM_EPS_MB: u64 = 32;
+
+/// A sample older than this is treated as missing (rows read `--`).
+const SAMPLE_MAX_AGE_SECS: u64 = 3;
+/// Consecutive quiet polls before the interval backs off toward idle.
+const STABLE_POLLS: u8 = 4;
 
 #[derive(Clone, Default, Debug)]
 pub struct HwStats {
@@ -33,22 +41,39 @@ pub struct HwStats {
     pub gpu_name: Option<String>,
 }
 
-/// Polls the LHM bridge on an adaptive hardware cadence: anything changing
-/// beyond noise resets to the active rate; 4 quiet polls in a row double the
-/// interval up to the idle cap.
+/// A source of hardware samples. `HwPoller` depends on this, not on the
+/// concrete `LhmFeed`, so the poll cadence is unit-testable with a fake.
+pub trait SensorFeed: Send {
+    fn latest(&self, max_age: Duration) -> Option<Vec<LhmSensor>>;
+}
+
+impl SensorFeed for LhmFeed {
+    fn latest(&self, max_age: Duration) -> Option<Vec<LhmSensor>> {
+        LhmFeed::latest(self, max_age)
+    }
+}
+
+/// Polls the feed on an adaptive hardware cadence: anything changing beyond
+/// noise resets to the active rate; `STABLE_POLLS` quiet polls in a row double
+/// the interval up to the idle cap.
 pub struct HwPoller {
     last: Instant,
     active: Duration,
     idle: Duration,
     next: Duration,
     stable_polls: u8,
-    lhm: super::lhm::LhmFeed,
+    feed: Box<dyn SensorFeed>,
     cached: HwStats,
     prev: Option<HwStats>,
 }
 
 impl HwPoller {
     pub fn new(active_ms: u64, idle_ms: u64) -> Self {
+        Self::with_feed(active_ms, idle_ms, Box::new(LhmFeed::start()))
+    }
+
+    /// Build a poller over an arbitrary feed (used by tests).
+    pub fn with_feed(active_ms: u64, idle_ms: u64, feed: Box<dyn SensorFeed>) -> Self {
         let active = Duration::from_millis(active_ms.max(1));
         Self {
             last: Instant::now() - active,
@@ -56,7 +81,7 @@ impl HwPoller {
             stable_polls: 0,
             active,
             idle: Duration::from_millis(idle_ms.max(active_ms.max(1))),
-            lhm: super::lhm::LhmFeed::start(),
+            feed,
             cached: HwStats::default(),
             prev: None,
         }
@@ -68,15 +93,15 @@ impl HwPoller {
             return None;
         }
         self.last = Instant::now();
-        if let Some(sensors) = self.lhm.latest(Duration::from_secs(3)) {
-            super::lhm::apply(&sensors, &mut self.cached);
+        if let Some(sensors) = self.feed.latest(Duration::from_secs(SAMPLE_MAX_AGE_SECS)) {
+            apply(&sensors, &mut self.cached);
         }
-        if self.changed_since_last() {
+        if changed(self.prev.as_ref(), &self.cached) {
             self.next = self.active;
             self.stable_polls = 0;
         } else {
             self.stable_polls = self.stable_polls.saturating_add(1);
-            if self.stable_polls >= 4 {
+            if self.stable_polls >= STABLE_POLLS {
                 self.next = (self.next * 2).min(self.idle);
                 self.stable_polls = 0;
             }
@@ -88,11 +113,6 @@ impl HwPoller {
     pub fn cached(&self) -> &HwStats {
         &self.cached
     }
-
-    /// True when the latest poll moved anything beyond idle noise.
-    fn changed_since_last(&self) -> bool {
-        changed(self.prev.as_ref(), &self.cached)
-    }
 }
 
 /// True when `cur` moved beyond idle noise from `prev`. A `None` prev (the
@@ -102,17 +122,26 @@ pub(crate) fn changed(prev: Option<&HwStats>, cur: &HwStats) -> bool {
     let Some(p) = prev else {
         return true;
     };
-    (cur.cpu_percent - p.cpu_percent).abs() > LOAD_EPS_PCT
-        || opt_u64_changed(cur.ram_used_mb, p.ram_used_mb, MEM_EPS_MB)
-        || opt_changed(cur.gpu_percent, p.gpu_percent, LOAD_EPS_PCT)
-        || opt_changed(cur.gpu_temp_c, p.gpu_temp_c, TEMP_EPS_C)
-        || opt_changed(cur.gpu_power_w, p.gpu_power_w, POWER_EPS_W)
-        || opt_changed(cur.cpu_temp_c, p.cpu_temp_c, TEMP_EPS_C)
-        || opt_changed(cur.cpu_power_w, p.cpu_power_w, POWER_EPS_W)
-        || cur.gpu_core_mhz != p.gpu_core_mhz
-        || cur.gpu_mem_mhz != p.gpu_mem_mhz
-        || cur.cpu_clock_mhz != p.cpu_clock_mhz
-        || opt_u64_changed(cur.gpu_vram_used_mb, p.gpu_vram_used_mb, MEM_EPS_MB)
+    scalar_changed(p, cur) || integer_changed(p, cur)
+}
+
+/// Continuous fields compared with an epsilon (they always jitter).
+fn scalar_changed(p: &HwStats, c: &HwStats) -> bool {
+    (c.cpu_percent - p.cpu_percent).abs() > LOAD_EPS_PCT
+        || opt_u64_changed(c.ram_used_mb, p.ram_used_mb, MEM_EPS_MB)
+        || opt_changed(c.gpu_percent, p.gpu_percent, LOAD_EPS_PCT)
+        || opt_changed(c.gpu_temp_c, p.gpu_temp_c, TEMP_EPS_C)
+        || opt_changed(c.gpu_power_w, p.gpu_power_w, POWER_EPS_W)
+        || opt_changed(c.cpu_temp_c, p.cpu_temp_c, TEMP_EPS_C)
+        || opt_changed(c.cpu_power_w, p.cpu_power_w, POWER_EPS_W)
+}
+
+/// Discrete fields compared exactly (a clock step is a real change).
+fn integer_changed(p: &HwStats, c: &HwStats) -> bool {
+    c.gpu_core_mhz != p.gpu_core_mhz
+        || c.gpu_mem_mhz != p.gpu_mem_mhz
+        || c.cpu_clock_mhz != p.cpu_clock_mhz
+        || opt_u64_changed(c.gpu_vram_used_mb, p.gpu_vram_used_mb, MEM_EPS_MB)
 }
 
 fn opt_changed(a: Option<f32>, b: Option<f32>, eps: f32) -> bool {
@@ -134,6 +163,31 @@ fn opt_u64_changed(a: Option<u64>, b: Option<u64>, eps: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sensor(ty: &str, name: &str, value: f64) -> LhmSensor {
+        LhmSensor {
+            hw: "Cpu:X".to_string(),
+            sensor_type: ty.to_string(),
+            name: name.to_string(),
+            value,
+        }
+    }
+
+    /// Feed that always returns the same sample.
+    struct FixedFeed(Vec<LhmSensor>);
+    impl SensorFeed for FixedFeed {
+        fn latest(&self, _max_age: Duration) -> Option<Vec<LhmSensor>> {
+            Some(self.0.clone())
+        }
+    }
+
+    /// Feed that never has a sample.
+    struct NoFeed;
+    impl SensorFeed for NoFeed {
+        fn latest(&self, _max_age: Duration) -> Option<Vec<LhmSensor>> {
+            None
+        }
+    }
 
     #[test]
     fn opt_changed_flags_only_noise_above_epsilon() {
@@ -215,5 +269,24 @@ mod tests {
             ..Default::default()
         };
         assert!(changed(Some(&a), &b), "integer clocks compare exactly");
+    }
+
+    #[test]
+    fn update_applies_the_feed_and_gates_by_cadence() {
+        let feed = FixedFeed(vec![sensor("Load", "CPU Total", 42.0)]);
+        let mut p = HwPoller::with_feed(200, 1000, Box::new(feed));
+        assert!(p.update().is_some(), "first poll is due");
+        assert_eq!(p.cached().cpu_percent, 42.0);
+        assert!(p.update().is_none(), "an immediate second poll is not due");
+    }
+
+    #[test]
+    fn update_without_a_sample_still_reports_cached() {
+        let mut p = HwPoller::with_feed(200, 1000, Box::new(NoFeed));
+        assert!(
+            p.update().is_some(),
+            "a due poll returns even with no sample"
+        );
+        assert_eq!(p.cached().cpu_percent, 0.0);
     }
 }

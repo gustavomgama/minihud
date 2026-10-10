@@ -5,6 +5,8 @@
 //! line on stdin. This module owns that child on a dedicated thread:
 //! the main loop NEVER blocks on it — `latest()` just reads the last
 //! good sample, and rows read "--" until the first one lands.
+//!
+//! Mapping a sample onto [`super::HwStats`] lives in [`super::apply`].
 
 use serde::Deserialize;
 use std::io::{BufRead, BufReader, Write};
@@ -12,6 +14,11 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Seconds before retrying a failed bridge session.
+const BRIDGE_RETRY_SECS: u64 = 5;
+/// Milliseconds between bridge polls (one JSON dump per tick).
+const BRIDGE_POLL_MS: u64 = 500;
 
 /// One sensor reading from the bridge.
 #[derive(Clone, Debug, Deserialize)]
@@ -57,9 +64,9 @@ impl LhmFeed {
     fn run(slot: LhmLatest) {
         loop {
             if let Err(e) = Self::session(&slot) {
-                tracing::warn!("lhm bridge: {e}; retry in 5s");
+                tracing::warn!("lhm bridge: {e}; retry in {BRIDGE_RETRY_SECS}s");
             }
-            std::thread::sleep(Duration::from_secs(5));
+            std::thread::sleep(Duration::from_secs(BRIDGE_RETRY_SECS));
         }
     }
 
@@ -125,7 +132,7 @@ fn pump(out: &mut impl BufRead, stdin: &mut impl Write, slot: &LhmLatest) -> Res
         if n == 0 {
             return Err("bridge closed stdout".to_string());
         }
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(BRIDGE_POLL_MS));
     }
 }
 
@@ -178,243 +185,76 @@ fn paths() -> Option<(PathBuf, PathBuf)> {
     ))
 }
 
-/// First sensor value whose hardware block matches `hw_matches`, whose type is
-/// `ty`, and whose name contains one of `names` (the first matching name wins).
-/// Shared by every CPU/GPU/RAM lookup so there is one implementation.
-fn pick(
-    sensors: &[LhmSensor],
-    hw_matches: impl Fn(&str) -> bool,
-    ty: &str,
-    names: &[&str],
-) -> Option<f64> {
-    names.iter().find_map(|n| {
-        sensors
-            .iter()
-            .find(|s| hw_matches(&s.hw) && s.sensor_type == ty && s.name.contains(n))
-            .map(|s| s.value)
-    })
-}
-
-/// Fill stats from an LHM sample. Each group is applied by its own helper;
-/// a missing sensor leaves its field untouched (which prints as `--`).
-pub fn apply(sensors: &[LhmSensor], stats: &mut super::HwStats) {
-    tracing::debug!("lhm apply: {} sensors", sensors.len());
-    apply_cpu(sensors, stats);
-    apply_ram(sensors, stats);
-    apply_names(sensors, stats);
-    apply_gpu(sensors, stats);
-}
-
-/// CPU load / temperature / power / clock from the `Cpu:` block.
-fn apply_cpu(sensors: &[LhmSensor], stats: &mut super::HwStats) {
-    let cpu = |ty: &str, names: &[&str]| pick(sensors, |hw| hw.starts_with("Cpu:"), ty, names);
-    if let Some(v) = cpu("Load", &["CPU Total"]) {
-        stats.cpu_percent = v.clamp(0.0, 100.0) as f32;
-    }
-    if let Some(v) = cpu(
-        "Temperature",
-        &["CPU Package", "Core Max", "Tctl", "Core ("],
-    ) {
-        stats.cpu_temp_c = Some(v as f32);
-    }
-    if let Some(v) = cpu("Power", &["Package", "CPU Package"]) {
-        stats.cpu_power_w = Some(v as f32);
-    }
-    if let Some(v) = cpu(
-        "Clock",
-        &["Cores (Average)", "CPU Core", "Core #1", "Core ("],
-    ) {
-        stats.cpu_clock_mhz = Some(v as u32);
-    }
-}
-
-/// RAM used / total in MB. LHM reports memory in GB.
-fn apply_ram(sensors: &[LhmSensor], stats: &mut super::HwStats) {
-    let mem = |names: &[&str]| pick(sensors, |hw| hw.starts_with("Memory:"), "Data", names);
-    let used = mem(&["Memory Used", "Used Memory"]);
-    let avail = mem(&["Memory Available", "Available Memory"]);
-    if let (Some(u), Some(a)) = (used, avail) {
-        stats.ram_used_mb = Some((u * 1024.0) as u64);
-        stats.ram_total_mb = Some(((u + a) * 1024.0) as u64);
-    }
-}
-
-/// CPU / GPU names from the first matching hardware block.
-fn apply_names(sensors: &[LhmSensor], stats: &mut super::HwStats) {
-    let name_of = |s: &LhmSensor| s.hw.split_once(':').map(|(_, n)| n.trim().to_string());
-    if let Some(s) = sensors.iter().find(|s| s.hw.starts_with("Cpu:")) {
-        stats.cpu_name = name_of(s);
-    }
-    if let Some(s) = sensors.iter().find(|s| s.hw.starts_with("Gpu")) {
-        stats.gpu_name = name_of(s);
-    }
-}
-
-/// GPU sensors from the first discrete GPU block (single-dGPU assumption,
-/// documented). Everything is scoped to that exact hardware string.
-fn apply_gpu(sensors: &[LhmSensor], stats: &mut super::HwStats) {
-    let Some(hw) = sensors
-        .iter()
-        .find(|s| s.hw.starts_with("Gpu"))
-        .map(|s| s.hw.clone())
-    else {
-        return;
-    };
-    let g = |ty: &str, names: &[&str]| pick(sensors, |h| h == hw.as_str(), ty, names);
-    if let Some(v) = g("Temperature", &["GPU Core"]) {
-        stats.gpu_temp_c = Some(v as f32);
-    }
-    if let Some(v) = g("Load", &["GPU Core"]) {
-        stats.gpu_percent = Some(v.clamp(0.0, 100.0) as f32);
-    }
-    if let Some(v) = g("Power", &["GPU Package", "GPU Power"]) {
-        stats.gpu_power_w = Some(v as f32);
-    }
-    if let Some(v) = g("Clock", &["GPU Core"]) {
-        stats.gpu_core_mhz = Some(v as u32);
-    }
-    if let Some(v) = g("Clock", &["GPU Memory"]) {
-        stats.gpu_mem_mhz = Some(v as u32);
-    }
-    if let Some(v) = g("Voltage", &["GPU Core", "GPU Voltage"]) {
-        stats.gpu_voltage_mv = Some(v as u32);
-    }
-    if let Some(v) = g("SmallData", &["D3D Dedicated Memory Used"]) {
-        stats.gpu_d3d_dedicated_mb = Some(v as u64);
-    }
-    let used = g("SmallData", &["GPU Memory Used"]);
-    let total = g("SmallData", &["GPU Memory Total"]);
-    if let Some(v) = used {
-        stats.gpu_mem_used_mb = Some(v as u64);
-    }
-    if let (Some(u), Some(t)) = (used, total) {
-        if t > 0.0 {
-            stats.gpu_vram_used_mb = Some(u as u64);
-            stats.gpu_vram_total_mb = Some(t as u64);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hw::HwStats;
 
-    fn s(hw: &str, ty: &str, name: &str, value: f64) -> LhmSensor {
-        LhmSensor {
-            hw: hw.to_string(),
-            sensor_type: ty.to_string(),
-            name: name.to_string(),
-            value,
-        }
+    fn empty_slot() -> LhmLatest {
+        Arc::new(Mutex::new(None))
     }
 
-    #[test]
-    fn apply_maps_cpu_sensors() {
-        let sensors = vec![
-            s("Cpu:AMD Ryzen 9", "Load", "CPU Total", 42.0),
-            s("Cpu:AMD Ryzen 9", "Temperature", "CPU Package", 61.5),
-            s("Cpu:AMD Ryzen 9", "Power", "Package", 88.0),
-            s("Cpu:AMD Ryzen 9", "Clock", "Cores (Average)", 4200.0),
-        ];
-        let mut st = HwStats::default();
-        apply(&sensors, &mut st);
-        assert_eq!(st.cpu_percent, 42.0);
-        assert_eq!(st.cpu_temp_c, Some(61.5));
-        assert_eq!(st.cpu_power_w, Some(88.0));
-        assert_eq!(st.cpu_clock_mhz, Some(4200));
-        assert_eq!(st.cpu_name.as_deref(), Some("AMD Ryzen 9"));
-    }
+    const ONE_SENSOR: &str = r#"[{"hw":"Cpu:X","type":"Load","name":"CPU Total","value":42.0}]"#;
 
     #[test]
-    fn apply_clamps_percentages() {
-        let sensors = vec![
-            s("Cpu:X", "Load", "CPU Total", 150.0),
-            s("GpuNvidia:RTX", "Load", "GPU Core", -5.0),
-        ];
-        let mut st = HwStats::default();
-        apply(&sensors, &mut st);
-        assert_eq!(st.cpu_percent, 100.0);
-        assert_eq!(st.gpu_percent, Some(0.0));
-    }
+    fn read_handshake_requires_a_ready_second_line() {
+        // Catches: accepting a bridge whose second hello line is not READY — the
+        // host would then parse protocol noise as sensor JSON.
+        let mut good = std::io::Cursor::new(b"lhm-bridge 0.9.4\nREADY\n".to_vec());
+        assert!(read_handshake(&mut good).is_ok());
 
-    #[test]
-    fn apply_maps_ram_in_megabytes() {
-        let sensors = vec![
-            s("Memory:", "Data", "Memory Used", 8.0),
-            s("Memory:", "Data", "Memory Available", 24.0),
-        ];
-        let mut st = HwStats::default();
-        apply(&sensors, &mut st);
-        assert_eq!(st.ram_used_mb, Some(8 * 1024));
-        assert_eq!(st.ram_total_mb, Some(32 * 1024));
-    }
-
-    #[test]
-    fn apply_maps_gpu_sensors() {
-        let sensors = vec![
-            s("GpuNvidia:RTX 3070", "Temperature", "GPU Core", 55.0),
-            s("GpuNvidia:RTX 3070", "Load", "GPU Core", 80.0),
-            s("GpuNvidia:RTX 3070", "Power", "GPU Package", 200.0),
-            s("GpuNvidia:RTX 3070", "Clock", "GPU Core", 1900.0),
-            s("GpuNvidia:RTX 3070", "Clock", "GPU Memory", 7000.0),
-            s("GpuNvidia:RTX 3070", "Voltage", "GPU Core", 1050.0),
-            s(
-                "GpuNvidia:RTX 3070",
-                "SmallData",
-                "D3D Dedicated Memory Used",
-                4096.0,
-            ),
-            s("GpuNvidia:RTX 3070", "SmallData", "GPU Memory Used", 3000.0),
-            s(
-                "GpuNvidia:RTX 3070",
-                "SmallData",
-                "GPU Memory Total",
-                8192.0,
-            ),
-        ];
-        let mut st = HwStats::default();
-        apply(&sensors, &mut st);
-        assert_eq!(st.gpu_temp_c, Some(55.0));
-        assert_eq!(st.gpu_percent, Some(80.0));
-        assert_eq!(st.gpu_power_w, Some(200.0));
-        assert_eq!(st.gpu_core_mhz, Some(1900));
-        assert_eq!(st.gpu_mem_mhz, Some(7000));
-        assert_eq!(st.gpu_voltage_mv, Some(1050));
-        assert_eq!(st.gpu_d3d_dedicated_mb, Some(4096));
-        assert_eq!(st.gpu_mem_used_mb, Some(3000));
-        assert_eq!(st.gpu_vram_used_mb, Some(3000));
-        assert_eq!(st.gpu_vram_total_mb, Some(8192));
-        assert_eq!(st.gpu_name.as_deref(), Some("RTX 3070"));
-    }
-
-    #[test]
-    fn apply_leaves_missing_fields_untouched() {
-        let mut st = HwStats {
-            cpu_temp_c: Some(50.0),
-            ..HwStats::default()
-        };
-        apply(&[], &mut st);
-        assert_eq!(
-            st.cpu_temp_c,
-            Some(50.0),
-            "no sensor must not clear a field"
+        let mut bad = std::io::Cursor::new(b"lhm-bridge 0.9.4\nNOPE\n".to_vec());
+        assert!(
+            read_handshake(&mut bad).is_err(),
+            "a non-READY hello must be rejected"
         );
-        assert_eq!(st.cpu_percent, 0.0);
-        assert_eq!(st.gpu_temp_c, None);
-        assert_eq!(st.cpu_name, None);
     }
 
     #[test]
-    fn apply_ignores_vram_when_total_is_zero() {
-        let sensors = vec![
-            s("GpuX:GPU", "SmallData", "GPU Memory Used", 100.0),
-            s("GpuX:GPU", "SmallData", "GPU Memory Total", 0.0),
-        ];
-        let mut st = HwStats::default();
-        apply(&sensors, &mut st);
-        assert_eq!(st.gpu_mem_used_mb, Some(100));
-        assert_eq!(st.gpu_vram_used_mb, None);
-        assert_eq!(st.gpu_vram_total_mb, None);
+    fn tick_writes_a_tick_and_publishes_the_parsed_sample() {
+        // Catches: a bridge tick that reads a line but never publishes it, so
+        // the poller always sees a stale/absent feed.
+        let slot = empty_slot();
+        let mut out = std::io::Cursor::new(format!("{ONE_SENSOR}\n").into_bytes());
+        let mut stdin: Vec<u8> = Vec::new();
+        let mut line = String::new();
+
+        let n = tick(&mut out, &mut stdin, &mut line, &slot).expect("tick");
+        assert!(n > 0);
+        assert_eq!(stdin, b"\n", "each tick must send a newline to the bridge");
+        let g = slot.lock().expect("slot");
+        let (_, sensors) = g.as_ref().expect("a stored sample");
+        assert_eq!(sensors.len(), 1);
+        assert_eq!(sensors[0].value, 42.0);
+    }
+
+    #[test]
+    fn store_sample_ignores_bad_json_without_clobbering_a_good_sample() {
+        // Catches: a single malformed bridge line wiping the last good sample,
+        // flipping every row to `--` on a transient parse error.
+        let slot = empty_slot();
+        store_sample(ONE_SENSOR, &slot);
+        assert!(slot.lock().expect("slot").is_some(), "good line stored");
+        store_sample("not json at all", &slot);
+        assert!(
+            slot.lock().expect("slot").is_some(),
+            "a bad line must not clear the slot"
+        );
+    }
+
+    #[test]
+    fn latest_returns_none_once_the_sample_goes_stale() {
+        // Catches: a feed that ignores `max_age` and serves an old sample
+        // forever, so a dead bridge would never show `--`.
+        let slot = empty_slot();
+        store_sample(ONE_SENSOR, &slot);
+        let feed = LhmFeed { latest: slot };
+        assert!(
+            feed.latest(Duration::from_secs(60)).is_some(),
+            "a fresh sample is returned"
+        );
+        assert!(
+            feed.latest(Duration::from_secs(0)).is_none(),
+            "a zero-age window means the sample is already stale"
+        );
     }
 }

@@ -1,5 +1,12 @@
 [workspace]
-members = [".", "xtask"]
+members = [
+    ".",
+    "xtask",
+    "crates/hook-ipc",
+    "crates/hook-rt",
+    "crates/hook-test",
+    "crates/hook-vk-layer",
+]
 
 [package]
 name = "minihud"
@@ -16,6 +23,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+hook-ipc = { path = "crates/hook-ipc" }
 
 [dependencies.windows]
 version = "0.61"
@@ -23,6 +31,13 @@ features = [
   "Win32_Foundation",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Console",
+  "Win32_System_Threading",
+  "Win32_System_Memory",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Performance",
 ]
 
 # Behavior-neutral release tuning only. Panic strategy is intentionally left
