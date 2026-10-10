@@ -505,7 +505,23 @@ mod tests {
     static GLOBAL_LOCK: Mutex<()> = Mutex::new(());
 
     fn serial() -> std::sync::MutexGuard<'static, ()> {
-        GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        let guard = GLOBAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Reset the process-global capture state so a test never inherits a
+        // chain (or a recorder) captured by an earlier test. Without this the
+        // suite is order-dependent: it passes under nextest (one process per
+        // test) but not under `cargo test` (one shared process) — which is what
+        // the coverage gate runs.
+        for a in [
+            &NEXT_GIPA,
+            &NEXT_GDPA,
+            &NEXT_PDPA,
+            &NEXT_PRESENT,
+            &GLOBAL_INSTANCE,
+        ] {
+            a.store(0, Ordering::Release);
+        }
+        *RECORDER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        guard
     }
 
     fn cstr(bytes: &[u8]) -> *const c_char {
