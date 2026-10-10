@@ -36,3 +36,6 @@ Run these in order; all must pass before declaring work complete:
 
 Never mark work done with a red test or a clippy warning. Report failures with
 `file:line` and the smallest fix.
+
+For the full audit (the same checks CI runs), run
+`powershell -ExecutionPolicy Bypass -File tools/audit.ps1`.

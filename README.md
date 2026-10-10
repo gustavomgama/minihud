@@ -121,6 +121,17 @@ Runs coverage (`cargo-llvm-cov`), CRAP (`cargo-crap --fail-above 30`),
 duplication (`jscpd --threshold 5`), and advisory `rustqual` / `mete` reports.
 Non-destructive (writes `lcov.info` + `target/`).
 
+### Full audit (local == CI)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/audit.ps1   # everything
+```
+
+The same checks run in CI (`.github/workflows/audit.yml`): `fmt`, `clippy`,
+`nextest`, `cargo-machete`, `cargo-deny`, `cargo-audit`, coverage, the CRAP and
+duplication gates, and advisory `rustqual` / `mete`. `tools/critic.ps1` is the
+quality subset of the same gate.
+
 ## License
 
 MIT.

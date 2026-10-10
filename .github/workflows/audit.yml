@@ -1,0 +1,94 @@
+name: audit
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  audit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - name: Cache cargo + installed bins
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: true
+
+      - name: Install tools (prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-deny,cargo-audit,cargo-machete,cargo-llvm-cov
+
+      - name: Install tools (cargo install)
+        shell: pwsh
+        run: |
+          $tools = @{
+            'cargo-crap' = 'cargo-crap'
+            'rustqual'   = 'rustqual'
+            'mete'       = 'mete'
+            'jscpd'      = 'jscpd-rs'
+          }
+          foreach ($cmd in $tools.Keys) {
+            if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
+              cargo install $($tools[$cmd])
+            }
+          }
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test (nextest)
+        run: cargo nextest run --workspace
+
+      - name: unused deps (cargo-machete)
+        run: cargo machete
+
+      - name: licenses / bans / sources (cargo-deny)
+        run: cargo deny check
+
+      - name: advisories (cargo-audit)
+        run: cargo audit
+
+      - name: coverage (cargo-llvm-cov)
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+
+      - name: CRAP gate (cargo-crap)
+        run: cargo crap --lcov lcov.info --exclude 'src/main.rs' --exclude 'build.rs' --exclude 'xtask/**' --threshold 30 --fail-above
+
+      - name: duplication gate (jscpd)
+        run: jscpd src --min-lines 5 --threshold 5
+
+      - name: rustqual (advisory)
+        continue-on-error: true
+        run: rustqual --coverage lcov.info --no-fail
+
+      - name: mete (advisory)
+        continue-on-error: true
+        run: mete analyze src
+
+      - name: upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: lcov.info
+          if-no-files-found: ignore
