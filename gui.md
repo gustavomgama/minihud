@@ -45,9 +45,8 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
    densities (Zen/Standard/Full row selection) done (`gui::model::rows_for`).
 6. [x] `--gui` wiring in `main.rs`; `cargo xtask` staging.
 7. [x] README/CHANGELOG; commit + push `gui`.
-8. [~] Polish: anchor/corner positioning ✅, content-fit window size ✅,
-   `scale` ✅, hairline ✅, monospace figures ✅. Remaining: live FPS feed in
-   GUI mode.
+8. [x] Polish: anchor/corner positioning, content-fit window size, `scale`,
+   hairline, monospace figures, live FPS feed in GUI mode.
 
 ## Progress log
 
@@ -86,3 +85,10 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   green (169 tests, both feature sets).
 - 2026-10-11: Docs (item 7): `minihud.toml.example`, README "OSD overlay" section
   + CLI/layout entries, CHANGELOG "Unreleased". Gate green (169 tests).
+- 2026-10-11: Live FPS in GUI mode (item 8). `fps::follow::select` exposed as
+  `resolve_follow_target`; `main::fps_loop` follows the foreground over ETW
+  (same tested debounce/target helpers) and publishes fps + 1% low into the
+  snapshot. **Smoke-tested**: runs clean, hero shows `--` when the foreground is
+  not a capturable target (degrades gracefully). Real fps needs a game +
+  staged PresentMon, not available headless. Gate green (169 tests, both feature
+  sets).

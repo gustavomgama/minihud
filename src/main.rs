@@ -75,7 +75,8 @@ fn main() -> Result<()> {
         // The OSD overlay window (feature `gui`).
         Mode::Gui => {
             ensure_elevated();
-            report("--gui", run_gui(hw))
+            let fps_opts = fps::parse_fps_opts(&args);
+            report("--gui", run_gui(hw, fps_opts))
         }
         // Default: follow the foreground process (or `--match`), showing fps +
         // hardware stats on the same line. `--fps-poll` drives the target poll.
@@ -175,15 +176,16 @@ where
     result
 }
 
-/// Run the OSD overlay: poll hardware in the background and paint the window
-/// on this (the main) thread, which the windowing system requires.
+/// Run the OSD overlay: poll hardware and follow the target's fps in background
+/// threads, and paint the window on this (the main) thread, which the windowing
+/// system requires.
 #[cfg(feature = "gui")]
-fn run_gui(hw: HwOpts) -> std::result::Result<(), String> {
+fn run_gui(hw: HwOpts, fps_opts: fps::FpsOpts) -> std::result::Result<(), String> {
     let cfg = gui::config::resolve();
     let data = Arc::new(std::sync::Mutex::new(gui::app::Snapshot::default()));
     let stop = Arc::new(AtomicBool::new(false));
 
-    let worker = {
+    let hw_worker = {
         let data = data.clone();
         let stop = stop.clone();
         std::thread::spawn(move || {
@@ -199,15 +201,74 @@ fn run_gui(hw: HwOpts) -> std::result::Result<(), String> {
         })
     };
 
+    let fps_worker = {
+        let data = data.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || fps_loop(&data, &stop, fps_opts))
+    };
+
     let result = gui::app::run(cfg, data);
     stop.store(true, Ordering::SeqCst);
-    let _ = worker.join();
+    let _ = hw_worker.join();
+    let _ = fps_worker.join();
     result.map_err(|e| e.to_string())
+}
+
+/// Follow the foreground target over ETW (tier 0, no injection) and publish its
+/// fps / 1% low into the overlay snapshot. Mirrors `fps::follow::run` without
+/// the console output; the debounce and target resolution are the same tested
+/// helpers.
+#[cfg(feature = "gui")]
+fn fps_loop(data: &std::sync::Mutex<gui::app::Snapshot>, stop: &AtomicBool, opts: fps::FpsOpts) {
+    use fps::follow::{feed_action, resolve_follow_target, FeedAction, FeedState};
+    use fps::presentmon::PresentMonFeed;
+    use fps::window::FpsSource;
+
+    let own = std::process::id();
+    let poll = Duration::from_millis(opts.poll_ms.max(1));
+    let mut feed: Option<PresentMonFeed> = None;
+    let mut state = FeedState::default();
+    let mut current: u32 = 0;
+    let mut next = Instant::now();
+
+    while !stop.load(Ordering::SeqCst) && console::should_run() {
+        if Instant::now() >= next {
+            next = Instant::now() + poll;
+            let selected = if opts.enabled {
+                resolve_follow_target(own, &None, opts.pid.as_deref())
+            } else {
+                None
+            };
+            let action = feed_action(&mut state, selected.as_ref().map(|(pid, _)| *pid), current);
+            match action {
+                FeedAction::Start => {
+                    if let Some((pid, _)) = selected {
+                        feed = Some(PresentMonFeed::start(pid));
+                        current = pid;
+                    }
+                }
+                FeedAction::Stop => {
+                    feed = None;
+                    current = 0;
+                }
+                FeedAction::Keep => {}
+            }
+        }
+        if let Some(f) = &feed {
+            let fps = f.fps(fps::FPS_WINDOW_MS as f64);
+            let low = f.one_percent_low();
+            if let Ok(mut snap) = data.lock() {
+                snap.fps = fps;
+                snap.one_percent_low = low;
+            }
+        }
+        std::thread::sleep(poll);
+    }
 }
 
 /// `--gui` needs the crate built with `--features gui`.
 #[cfg(not(feature = "gui"))]
-fn run_gui(_hw: HwOpts) -> std::result::Result<(), String> {
+fn run_gui(_hw: HwOpts, _fps_opts: fps::FpsOpts) -> std::result::Result<(), String> {
     tracing::error!("--gui requires a build with the `gui` feature (cargo build --features gui)");
     std::process::exit(2);
 }

@@ -103,7 +103,11 @@ pub fn should_redraw(last_seq: Option<u64>, cur_seq: u64) -> bool {
 }
 
 /// Resolve the pid to observe, honoring an explicit target over the glob.
-fn select(own: u32, match_glob: &Option<String>, explicit: Option<&str>) -> Option<(u32, String)> {
+pub(crate) fn resolve_follow_target(
+    own: u32,
+    match_glob: &Option<String>,
+    explicit: Option<&str>,
+) -> Option<(u32, String)> {
     if let Some(target) = explicit {
         let pid = proc::find_pid(target)?;
         let name = proc::process_name(pid).unwrap_or_else(|| target.to_string());
@@ -166,7 +170,7 @@ pub fn run(match_glob: Option<String>, secs: Option<u64>, opts: FpsOpts) -> Resu
     while crate::console::should_run() && deadline.is_none_or(|d| Instant::now() < d) {
         if Instant::now() >= next_poll {
             next_poll = Instant::now() + poll;
-            let selected = select(own, &match_glob, opts.pid.as_deref());
+            let selected = resolve_follow_target(own, &match_glob, opts.pid.as_deref());
             match feed_action(
                 &mut feed_state,
                 selected.as_ref().map(|(pid, _)| *pid),
