@@ -52,6 +52,9 @@ pub struct Config {
     pub accent: Accent,
     pub poll_ms: u64,
     pub fade_idle_secs: u64,
+    /// Optional `--match` glob to follow, so a set-and-forget overlay can pin a
+    /// target without a CLI flag. A `--match` on the command line wins.
+    pub target: Option<String>,
 }
 
 impl Default for Config {
@@ -65,6 +68,7 @@ impl Default for Config {
             accent: Accent::Thermal,
             poll_ms: 500,
             fade_idle_secs: 0,
+            target: None,
         }
     }
 }
@@ -159,6 +163,7 @@ mod tests {
         assert_eq!(c.accent, Accent::Thermal);
         assert_eq!(c.poll_ms, 500);
         assert_eq!(c.fade_idle_secs, 0);
+        assert_eq!(c.target, None);
     }
 
     #[test]
@@ -213,6 +218,15 @@ mod tests {
         // Catches: an invalid density/anchor/accent silently falling back
         // instead of telling the user the value is not one of the choices.
         assert!(Config::from_toml("density = \"turbo\"\n").is_err());
+    }
+
+    #[test]
+    fn target_defaults_to_none_and_parses_from_toml() {
+        // Catches: the set-and-forget `target` being ignored (a pinned game
+        // never followed) or a stray default target.
+        assert_eq!(Config::default().target, None);
+        let c = Config::from_toml("target = \"deadlock*.exe\"\n").expect("parse");
+        assert_eq!(c.target.as_deref(), Some("deadlock*.exe"));
     }
 
     fn temp_path(tag: &str) -> std::path::PathBuf {

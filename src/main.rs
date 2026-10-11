@@ -187,6 +187,8 @@ fn run_gui(
     match_glob: Option<String>,
 ) -> std::result::Result<(), String> {
     let cfg = gui::config::resolve();
+    // A `--match` on the command line wins; else the config's pinned target.
+    let match_glob = match_glob.or_else(|| cfg.target.clone());
     let data = Arc::new(std::sync::Mutex::new(gui::app::Snapshot::default()));
     let stop = Arc::new(AtomicBool::new(false));
     let quit = Arc::new(AtomicBool::new(false));

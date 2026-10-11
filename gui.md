@@ -60,6 +60,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 11. [x] Value roll: FPS / 1% low / bars animate to new values (`animate_value_with_time`).
 12. [x] `--gui --match <glob>` targets a named exe instead of the foreground.
 13. [x] Quit hotkey: Ctrl+Alt+H closes the click-through overlay (`RegisterHotKey`).
+14. [x] Config `target`: pin a `--match` glob in `minihud.toml` (CLI wins).
 
 ## Progress log
 
@@ -140,3 +141,8 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   `Win32_UI_Input_KeyboardAndMouse` windows feature. **Verified end-to-end**: the
   log shows the hotkey registered, and a synthesized Ctrl+Alt+H closed the
   process. Gate green (176 tests, both feature sets).
+- 2026-10-11: Config `target` (item 14). Set-and-forget users can pin a game in
+  `minihud.toml` instead of passing `--match` each launch; a CLI `--match` wins.
+  Config test guards the field; example + README/CHANGELOG updated. Smoke-tested:
+  the overlay starts clean with a `target`. Gate green (177 tests, both feature
+  sets).
