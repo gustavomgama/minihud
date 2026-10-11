@@ -41,7 +41,8 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 2. [x] `gui::model` — row model, thresholds, `--` for missing. (TDD)
 3. [x] `gui::config` — TOML-backed, defaults = set-and-forget. (TDD)
 4. [ ] `gui::app` — eframe overlay: transparent, always-on-top, click-through.
-5. [ ] Densities + accent theming.
+5. [~] Accent theming done (`gui::theme`: thermal gradient + load thresholds);
+   densities (Zen/Standard/Full row selection) still pending.
 6. [ ] `--gui` wiring in `main.rs`; `cargo xtask` staging.
 7. [ ] README/CHANGELOG; commit + push `gui`.
 
@@ -55,3 +56,6 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   set-and-forget defaults, missing fields filled from defaults, out-of-range numbers
   clamped (opacity 0.1..1, scale 0.5..3, poll 100..10000, margin ≤200), unknown
   keys/values rejected. Added `toml` dep. Gate green (154 tests).
+- 2026-10-11: `gui::theme` landed (TDD, 5 tests): thermal accent gradient
+  (cool blue→warm red), load-threshold tone (calm/amber/alarm), fixed accent
+  hues, thermal fallback when no temperature. Gate green (159 tests).
