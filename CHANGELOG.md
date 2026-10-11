@@ -28,6 +28,8 @@
   names the followed process.
 - **Quiet motion.** Changed numbers roll to their new values; the panel fades
   after `fade_idle_secs` and repaints slowly once settled.
+- **Live console under the overlay.** GUI runs print the same hardware + fps
+  status line as the headless modes.
 
 ### Fixes
 

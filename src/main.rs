@@ -263,6 +263,9 @@ fn hw_loop(data: &std::sync::Mutex<gui::app::Snapshot>, stop: &AtomicBool, poll_
             if let Ok(mut snap) = data.lock() {
                 snap.stats = poller.cached().clone();
             }
+            // Keep the console readout intact: the overlay run prints the same
+            // live status line as the headless modes.
+            console::status_hw(render::line(poller.cached()));
         }
         std::thread::sleep(poller.due_in());
     }
@@ -284,15 +287,22 @@ fn demo_loop(data: &std::sync::Mutex<gui::app::Snapshot>, stop: &AtomicBool) {
             if snap.fps_history.len() > FPS_HISTORY {
                 snap.fps_history.remove(0);
             }
+            // Same console readout as a live run, under a `demo` label.
+            console::status_hw(render::line(&snap.stats));
+            let ms = 1000.0 / fps;
+            console::status_capture(format!(
+                "demo: {fps:.1} fps  {ms:.2} ms  1% low {:.1}",
+                fps * 0.82
+            ));
         }
         std::thread::sleep(Duration::from_millis(400));
     }
 }
 
 /// Follow the foreground target over ETW (tier 0, no injection) and publish its
-/// fps / 1% low into the overlay snapshot. Mirrors `fps::follow::run` without
-/// the console output; the debounce and target resolution are the same tested
-/// helpers.
+/// fps / 1% low into the overlay snapshot, mirroring the console status line of
+/// `fps::follow::run` so the GUI run keeps the headless readout intact. The
+/// debounce and target resolution are the same tested helpers.
 #[cfg(feature = "gui")]
 fn fps_loop(
     data: &std::sync::Mutex<gui::app::Snapshot>,
@@ -300,7 +310,10 @@ fn fps_loop(
     opts: fps::FpsOpts,
     match_glob: Option<String>,
 ) {
-    use fps::follow::{feed_action, resolve_follow_target, FeedAction, FeedState};
+    use fps::follow::{
+        capture_label, feed_action, render_line, resolve_follow_target, should_redraw, FeedAction,
+        FeedState,
+    };
     use fps::presentmon::PresentMonFeed;
     use fps::window::FpsSource;
 
@@ -309,6 +322,8 @@ fn fps_loop(
     let mut feed: Option<PresentMonFeed> = None;
     let mut state = FeedState::default();
     let mut current: u32 = 0;
+    let mut label = String::new();
+    let mut drawn_seq: Option<u64> = None;
     let mut next = Instant::now();
     let mut last_log: Option<String> = None;
 
@@ -327,6 +342,8 @@ fn fps_loop(
                         log_target(&mut last_log, format!("following {exe} (pid {pid})"));
                         feed = Some(PresentMonFeed::start(pid));
                         current = pid;
+                        label = capture_label(pid);
+                        drawn_seq = None; // a new feed must draw its first state
                         if let Ok(mut snap) = data.lock() {
                             snap.target = exe;
                         }
@@ -336,6 +353,9 @@ fn fps_loop(
                     log_target(&mut last_log, "target gone".to_string());
                     feed = None;
                     current = 0;
+                    label.clear();
+                    drawn_seq = None;
+                    crate::console::status_capture("");
                     // Clear the readout, so a dead target does not leave a stale
                     // fps frozen on the overlay.
                     if let Ok(mut snap) = data.lock() {
@@ -360,6 +380,12 @@ fn fps_loop(
                         snap.fps_history.remove(0);
                     }
                 }
+            }
+            // Same frame-driven console line as the headless follow loop.
+            let seq = f.sample_seq();
+            if should_redraw(drawn_seq, seq) {
+                crate::console::status_capture(render_line(&label, f));
+                drawn_seq = Some(seq);
             }
         }
         std::thread::sleep(poll);

@@ -83,6 +83,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 27. [x] Settled fade stops repainting at 20 fps (`motion::fade_animating`).
 28. [x] `cargo xtask build` includes the overlay by default (no `--features` flag).
 29. [x] Bare run opens the overlay natively (no `--gui` flag).
+30. [x] GUI runs keep the console hardware + fps status line.
 
 ## Progress log
 
@@ -250,3 +251,10 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   default to console follow); explicit `--follow` / `--stats-only` opt out to
   the console. usage(), README, CHANGELOG updated. **Verified live**: `--help`
   shows the overlay as default. Gate green (196 tests, both features).
+- 2026-10-11: Intact console (item 30). GUI runs printed no status line (the
+  `fps_loop` doc even said "without the console output"). `hw_loop` /
+  `fps_loop` / `demo_loop` now mirror the headless `status_hw` / `status_capture`
+  segments via the tested `render_line` / `should_redraw` helpers and a shared
+  `capture_label` (TDD), cleared when the target drops. **Verified live**:
+  `MINIHUD_DEMO=1 minihud --follow-secs 4` printed live hardware + fps lines.
+  Gate green (197 tests, both features).

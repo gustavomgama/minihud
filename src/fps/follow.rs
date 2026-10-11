@@ -91,6 +91,12 @@ pub fn render_line(label: &str, source: &dyn FpsSource) -> String {
     capture_line(label, source, FPS_WINDOW_MS as f64)
 }
 
+/// The console capture label for a followed pid, shared by the headless follow
+/// loop and the GUI loops so both readouts name the target identically.
+pub fn capture_label(pid: u32) -> String {
+    format!("pid {pid}")
+}
+
 /// Whether the fps capture line must be redrawn this tick: only when the sample
 /// sequence moved (a new frame was recorded), or on the first draw / the
 /// transition into or out of the `--` state. `None` means nothing has been drawn
@@ -181,7 +187,7 @@ pub fn run(match_glob: Option<String>, secs: Option<u64>, opts: FpsOpts) -> Resu
                         log_once(&mut last_status, format!("target={exe} (pid {pid})"));
                         feed = opts.enabled.then(|| PresentMonFeed::start(pid));
                         current = pid;
-                        label = format!("pid {pid}");
+                        label = capture_label(pid);
                         drawn_seq = None; // a new feed must draw its first state
                     }
                 }
@@ -421,6 +427,13 @@ mod tests {
             !should_redraw(Some(0), 0),
             "`--` staying `--` must not redraw"
         );
+    }
+
+    #[test]
+    fn capture_label_names_the_pid_like_the_console_line() {
+        // Catches: the GUI console line labeling the target differently from
+        // the headless follow line, so the two readouts disagree.
+        assert_eq!(capture_label(23996), "pid 23996");
     }
 
     #[test]

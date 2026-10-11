@@ -177,7 +177,8 @@ MINIHUD_NO_ELEVATE=1         skip the UAC self-elevation (headless tests/diagnos
 A fully customizable on-screen display: a transparent, always-on-top,
 **click-through** panel (built with `egui`/`eframe`) showing FPS plus CPU / GPU /
 RAM. It opens on a bare run; `--follow` and `--stats-only` select the headless
-console modes instead.
+console modes instead. The console keeps its live hardware + fps status line
+while the overlay runs.
 
 | Zen | Standard |
 |---|---|
