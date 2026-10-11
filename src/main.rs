@@ -273,6 +273,7 @@ fn demo_loop(data: &std::sync::Mutex<gui::app::Snapshot>, stop: &AtomicBool) {
             snap.stats = gui::demo::stats(t);
             snap.fps = Some(fps);
             snap.one_percent_low = Some(fps * 0.82);
+            snap.target = "deadlock.exe".to_string();
             snap.fps_history.push(fps as f32);
             if snap.fps_history.len() > FPS_HISTORY {
                 snap.fps_history.remove(0);
@@ -320,6 +321,9 @@ fn fps_loop(
                         log_target(&mut last_log, format!("following {exe} (pid {pid})"));
                         feed = Some(PresentMonFeed::start(pid));
                         current = pid;
+                        if let Ok(mut snap) = data.lock() {
+                            snap.target = exe;
+                        }
                     }
                 }
                 FeedAction::Stop => {
@@ -332,6 +336,7 @@ fn fps_loop(
                         snap.fps = None;
                         snap.one_percent_low = None;
                         snap.fps_history.clear();
+                        snap.target.clear();
                     }
                 }
                 FeedAction::Keep => {}

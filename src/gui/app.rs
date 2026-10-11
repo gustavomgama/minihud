@@ -34,6 +34,8 @@ pub struct Snapshot {
     pub one_percent_low: Option<f64>,
     /// Recent fps samples (newest last), for the Full-density sparkline.
     pub fps_history: Vec<f32>,
+    /// The followed process name, empty when nothing is followed.
+    pub target: String,
 }
 
 /// Launch the overlay. Blocks until the window is closed. `quit` is set by an
@@ -229,6 +231,13 @@ fn hero(ui: &mut egui::Ui, snap: &Snapshot, accent: egui::Color32, scale: f32) {
                         .size(10.0 * scale)
                         .weak(),
                 );
+            }
+        });
+        // The followed process, right-aligned — so a set-and-forget user can
+        // confirm the overlay is tracking the right game.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if !snap.target.is_empty() {
+                ui.label(egui::RichText::new(&snap.target).size(10.0 * scale).weak());
             }
         });
     });
