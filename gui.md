@@ -45,8 +45,9 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
    densities (Zen/Standard/Full row selection) done (`gui::model::rows_for`).
 6. [x] `--gui` wiring in `main.rs`; `cargo xtask` staging.
 7. [ ] README/CHANGELOG; commit + push `gui`.
-8. [ ] Polish: anchor/corner positioning, content-fit window size, `scale`,
-   live FPS feed in GUI mode, hairline, tabular-figure font.
+8. [~] Polish: anchor/corner positioning ✅, content-fit window size ✅,
+   `scale` ✅, hairline ✅, monospace figures ✅. Remaining: live FPS feed in
+   GUI mode.
 
 ## Progress log
 
@@ -75,3 +76,11 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   the window renders (rounded glass panel, hero FPS `--`, CPU `0%` + bar, RAM/GPU
   `--`). LHM DLL not staged so hardware reads `--`; FPS not yet fed in GUI mode.
   Gate green (166 tests, default and `--features gui`, both clippy-clean).
+- 2026-10-11: `gui::layout` (TDD, 3 tests): `anchor_pos` (four corners, clamped
+  on-screen) + `content_size` (grows with density and `scale`). App now sizes
+  the window to content, anchors to the configured corner once the monitor size
+  is known, applies `scale`, and draws a hairline. Window auto-fits to the
+  measured panel each frame, so a bottom/right anchor sits flush. **Smoke-tested
+  live** with `anchor=bottom-right, density=full, scale=1.2, accent=amber`: the
+  panel rendered 312x257 (fit, not 353), 7 rows, amber hero, hairline. Gate
+  green (169 tests, both feature sets).

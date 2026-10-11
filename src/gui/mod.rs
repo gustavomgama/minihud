@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 pub mod config;
+pub mod layout;
 pub mod model;
 pub mod theme;
 
