@@ -67,6 +67,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 18. [x] Design pass from the screenshots: compact memory, hero rework, temp tints.
 19. [x] Threshold tune: load amber at 70%, red at 85%; temps green<65, amber<80.
 20. [x] Signature accent rail on the panel's left edge.
+21. [x] Fix `tools/audit.ps1` CRAP exclude; full audit now PASSes.
 
 ## Progress log
 
@@ -181,3 +182,9 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   edge (inset to clear the rounded corners) ties the theme colour into the panel
   structure — previously the accent only appeared in the hero number and the
   sparkline. Re-captured all four README screenshots. Gate green (187 tests).
+- 2026-10-11: CI fix (item 21). Ran the **full audit** (`tools/audit.ps1`,
+  local == CI): it FAILED on the CRAP gate — `audit.ps1` still had the old CRAP
+  command without the `src/gui/app.rs` exclude (I'd only updated `critic.ps1`
+  and the workflow). Added the exclude; the full audit now **PASSes** end to
+  end (fmt, clippy, nextest, machete, deny, audit, coverage, CRAP, jscpd,
+  rustqual/mete advisory).
