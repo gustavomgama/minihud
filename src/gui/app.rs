@@ -13,10 +13,11 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-use super::config::Config;
+use super::config::{Config, Density};
 use super::layout;
 use super::model::{self, Metric};
 use super::motion;
+use super::spark;
 use super::theme::{self, Rgb};
 use crate::hw::HwStats;
 
@@ -31,6 +32,8 @@ pub struct Snapshot {
     pub stats: HwStats,
     pub fps: Option<f64>,
     pub one_percent_low: Option<f64>,
+    /// Recent fps samples (newest last), for the Full-density sparkline.
+    pub fps_history: Vec<f32>,
 }
 
 /// Launch the overlay. Blocks until the window is closed. `quit` is set by an
@@ -130,6 +133,10 @@ impl eframe::App for Overlay {
                 ui.add_space(10.0 * scale);
                 for m in &rows {
                     row(ui, m, scale);
+                }
+                if self.cfg.density == Density::Full {
+                    ui.add_space(6.0 * scale);
+                    sparkline(ui, &snap.fps_history, accent, scale);
                 }
             });
 
@@ -231,6 +238,40 @@ fn bar(ui: &mut egui::Ui, key: &str, fraction: f32, scale: f32) {
     let mut fill = rect;
     fill.set_width(rect.width() * shown);
     painter.rect_filled(fill, radius, to_color(theme::load_color(shown)));
+}
+
+/// A compact fps history line (Full density). Nothing is drawn until there are
+/// at least two samples.
+fn sparkline(ui: &mut egui::Ui, history: &[f32], accent: egui::Color32, scale: f32) {
+    if history.len() < 2 {
+        return;
+    }
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 22.0 * scale),
+        egui::Sense::hover(),
+    );
+    let max = history.iter().copied().fold(0.0_f32, f32::max).max(1.0);
+    let norm = spark::normalize(history, max);
+    let n = norm.len();
+    let points: Vec<egui::Pos2> = norm
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let x = rect.left() + rect.width() * (i as f32 / (n - 1) as f32);
+            let y = rect.bottom() - rect.height() * v;
+            egui::pos2(x, y)
+        })
+        .collect();
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        egui::CornerRadius::same(2),
+        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 10),
+    );
+    painter.add(egui::Shape::line(
+        points,
+        egui::Stroke::new((1.5 * scale).max(1.0), accent),
+    ));
 }
 
 fn to_color(c: Rgb) -> egui::Color32 {

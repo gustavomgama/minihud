@@ -9,6 +9,7 @@ pub mod config;
 pub mod layout;
 pub mod model;
 pub mod motion;
+pub mod spark;
 pub mod theme;
 
 #[cfg(feature = "gui")]

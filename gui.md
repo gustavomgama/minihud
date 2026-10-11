@@ -62,6 +62,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 13. [x] Quit hotkey: Ctrl+Alt+H closes the click-through overlay (`RegisterHotKey`).
 14. [x] Config `target`: pin a `--match` glob in `minihud.toml` (CLI wins).
 15. [x] Clear the fps readout when the target is lost; log target changes.
+16. [x] Full-density FPS sparkline (`gui::spark` + fps history in the snapshot).
 
 ## Progress log
 
@@ -152,3 +153,8 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   on the last fps forever instead of reading `--`. `FeedAction::Stop` now clears
   fps/1% low, and target changes log (`overlay: following X (pid N)` / `target
   gone`), matching the headless mode. Gate green (177 tests, both feature sets).
+- 2026-10-11: Full-density FPS sparkline (item 16). `gui::spark::normalize`
+  (TDD, 3 tests) maps a series to 0..=1 heights; the snapshot carries a capped
+  fps history (120) the `fps_loop` fills; the app draws the line in Full density
+  (nothing until ≥2 samples). Smoke-tested: Full renders clean, no panic. Gate
+  green (180 tests, both feature sets).

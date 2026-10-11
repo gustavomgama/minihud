@@ -31,6 +31,9 @@ const DEFAULT_HW_POLL_MS: u64 = 500;
 /// Longest slice the shutdown-aware poll wait sleeps before re-checking the stop
 /// flag, so exit reaps the LHM child promptly at any poll cadence.
 const SHUTDOWN_POLL: Duration = Duration::from_millis(100);
+/// fps samples kept for the overlay's Full-density sparkline.
+#[cfg(feature = "gui")]
+const FPS_HISTORY: usize = 120;
 /// ShellExecuteW reports success as a value greater than 32 (Win32 docs).
 const SHELLEXECUTE_SUCCESS: isize = 32;
 
@@ -272,6 +275,7 @@ fn fps_loop(
                     if let Ok(mut snap) = data.lock() {
                         snap.fps = None;
                         snap.one_percent_low = None;
+                        snap.fps_history.clear();
                     }
                 }
                 FeedAction::Keep => {}
@@ -283,6 +287,12 @@ fn fps_loop(
             if let Ok(mut snap) = data.lock() {
                 snap.fps = fps;
                 snap.one_percent_low = low;
+                if let Some(v) = fps {
+                    snap.fps_history.push(v as f32);
+                    if snap.fps_history.len() > FPS_HISTORY {
+                        snap.fps_history.remove(0);
+                    }
+                }
             }
         }
         std::thread::sleep(poll);
