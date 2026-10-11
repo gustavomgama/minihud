@@ -197,33 +197,74 @@ fn run_gui(
     let quit = Arc::new(AtomicBool::new(false));
     spawn_quit_hotkey(quit.clone());
 
-    let hw_worker = {
-        let data = data.clone();
-        let stop = stop.clone();
-        std::thread::spawn(move || {
-            let mut poller = hw::HwPoller::new(hw.poll_ms);
-            while !stop.load(Ordering::SeqCst) && console::should_run() {
-                if poller.update().is_some() {
-                    if let Ok(mut snap) = data.lock() {
-                        snap.stats = poller.cached().clone();
-                    }
-                }
-                std::thread::sleep(poller.due_in());
-            }
-        })
-    };
+    // `MINIHUD_DEMO=1` feeds synthetic data so the overlay can be previewed (and
+    // screenshotted) without hardware or the LHM DLL.
+    let demo = std::env::var_os("MINIHUD_DEMO").is_some();
+    if demo {
+        tracing::info!("overlay: demo mode (synthetic data)");
+    }
 
-    let fps_worker = {
+    let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
+    if demo {
         let data = data.clone();
         let stop = stop.clone();
-        std::thread::spawn(move || fps_loop(&data, &stop, fps_opts, match_glob))
-    };
+        workers.push(std::thread::spawn(move || demo_loop(&data, &stop)));
+    } else {
+        let poll_ms = hw.poll_ms;
+        {
+            let data = data.clone();
+            let stop = stop.clone();
+            workers.push(std::thread::spawn(move || hw_loop(&data, &stop, poll_ms)));
+        }
+        {
+            let data = data.clone();
+            let stop = stop.clone();
+            workers.push(std::thread::spawn(move || {
+                fps_loop(&data, &stop, fps_opts, match_glob)
+            }));
+        }
+    }
 
     let result = gui::app::run(cfg, data, quit);
     stop.store(true, Ordering::SeqCst);
-    let _ = hw_worker.join();
-    let _ = fps_worker.join();
+    for worker in workers {
+        let _ = worker.join();
+    }
     result.map_err(|e| e.to_string())
+}
+
+/// Poll the hardware sensors into the overlay snapshot until stopped.
+#[cfg(feature = "gui")]
+fn hw_loop(data: &std::sync::Mutex<gui::app::Snapshot>, stop: &AtomicBool, poll_ms: u64) {
+    let mut poller = hw::HwPoller::new(poll_ms);
+    while !stop.load(Ordering::SeqCst) && console::should_run() {
+        if poller.update().is_some() {
+            if let Ok(mut snap) = data.lock() {
+                snap.stats = poller.cached().clone();
+            }
+        }
+        std::thread::sleep(poller.due_in());
+    }
+}
+
+/// Feed synthetic [`gui::demo`] samples into the overlay snapshot until stopped.
+#[cfg(feature = "gui")]
+fn demo_loop(data: &std::sync::Mutex<gui::app::Snapshot>, stop: &AtomicBool) {
+    let start = Instant::now();
+    while !stop.load(Ordering::SeqCst) && console::should_run() {
+        let t = start.elapsed().as_secs_f32();
+        let fps = gui::demo::fps(t);
+        if let Ok(mut snap) = data.lock() {
+            snap.stats = gui::demo::stats(t);
+            snap.fps = Some(fps);
+            snap.one_percent_low = Some(fps * 0.82);
+            snap.fps_history.push(fps as f32);
+            if snap.fps_history.len() > FPS_HISTORY {
+                snap.fps_history.remove(0);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(400));
+    }
 }
 
 /// Follow the foreground target over ETW (tier 0, no injection) and publish its

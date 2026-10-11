@@ -178,6 +178,18 @@ An optional, fully customizable on-screen display: a transparent, always-on-top,
 **click-through** panel (built with `egui`/`eframe`) showing FPS plus CPU / GPU /
 RAM. It is **off by default** so the headless build stays lean.
 
+| Zen | Standard |
+|---|---|
+| ![Zen — fps plus one hero metric](docs/osd-zen.png) | ![Standard — fps plus CPU / RAM / GPU bars](docs/osd-standard.png) |
+
+| Full — every field plus an fps sparkline | Full, magenta accent, large scale |
+|---|---|
+| ![Full — every hardware field and a sparkline](docs/osd-full.png) | ![Full in magenta at 1.6x scale](docs/osd-full-magenta.png) |
+
+The screenshots use **demo mode**: `MINIHUD_DEMO=1 minihud --gui` feeds synthetic,
+animated values, so you can preview the overlay — and its themes — without any
+hardware or the LHM DLL.
+
 ```powershell
 cargo build --features gui        # or: cargo xtask build --features gui
 target\debug\minihud.exe --gui

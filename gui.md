@@ -63,6 +63,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 14. [x] Config `target`: pin a `--match` glob in `minihud.toml` (CLI wins).
 15. [x] Clear the fps readout when the target is lost; log target changes.
 16. [x] Full-density FPS sparkline (`gui::spark` + fps history in the snapshot).
+17. [x] Demo mode (`MINIHUD_DEMO=1`) + README screenshots of four variations.
 
 ## Progress log
 
@@ -158,3 +159,8 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   fps history (120) the `fps_loop` fills; the app draws the line in Full density
   (nothing until ≥2 samples). Smoke-tested: Full renders clean, no panic. Gate
   green (180 tests, both feature sets).
+- 2026-10-11: Demo mode + README screenshots (item 17). `gui::demo` (TDD, 3
+  tests) yields plausible, deterministic, time-varying samples;
+  `MINIHUD_DEMO=1` makes `run_gui` feed them instead of the real pollers. Captured
+  four variations through egui-mcp into `docs/` (zen/standard/full/full-magenta)
+  and linked them in the README. Gate green (183 tests, both feature sets).

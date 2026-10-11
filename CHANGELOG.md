@@ -15,6 +15,8 @@
   run calm → amber → alarm.
 - **Quit hotkey.** The overlay is click-through with no taskbar entry; press
   **Ctrl+Alt+H** to close it.
+- **Demo mode.** `MINIHUD_DEMO=1` feeds synthetic, animated values, so the
+  overlay (and its themes) can be previewed without hardware or the LHM DLL.
 
 ## 1.0.0
 
