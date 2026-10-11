@@ -27,6 +27,12 @@ pub fn idle_opacity(base: f32, fade_idle_secs: u64, idle_for_secs: f32) -> f32 {
     base * (FLOOR + (1.0 - FLOOR) * (1.0 - t))
 }
 
+/// True while the fade is actually changing, so the overlay repaints fast only
+/// then. A settled panel (fully faded or full) repaints slowly.
+pub fn fade_animating(factor: f32, last_factor: f32) -> bool {
+    (factor - last_factor).abs() > 0.001
+}
+
 /// A cheap signature of what is drawn, so the overlay can tell whether anything
 /// changed since the last frame (and therefore is not idle).
 pub fn signature(rows: &[Metric], fps: Option<f64>, low: Option<f64>) -> u64 {
@@ -121,5 +127,14 @@ mod tests {
             signature(&model::rows(&busy), Some(60.0), Some(45.0)),
             "metric value"
         );
+    }
+
+    #[test]
+    fn settled_fade_does_not_request_fast_repaint() {
+        // Catches: a fully-faded panel repainting at 20 fps forever because the
+        // check is `factor < 0.999` (a settled 0.15 factor never reaches 1.0).
+        assert!(!fade_animating(0.15, 0.15), "settled faded must be slow");
+        assert!(!fade_animating(1.0, 1.0), "settled full must be slow");
+        assert!(fade_animating(0.5, 1.0), "changing fade must be fast");
     }
 }

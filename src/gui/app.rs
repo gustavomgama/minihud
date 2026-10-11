@@ -64,6 +64,7 @@ pub fn run(cfg: Config, data: Arc<Mutex<Snapshot>>, quit: Arc<AtomicBool>) -> ef
                 last_h: -1.0,
                 last_sig: None,
                 last_change: Instant::now(),
+                last_factor: 1.0,
                 quit,
             }))
         }),
@@ -83,6 +84,9 @@ struct Overlay {
     last_sig: Option<u64>,
     /// When the content last changed (drives the idle fade).
     last_change: Instant,
+    /// The opacity factor drawn last frame, so the fade repaints fast only while
+    /// it is actually changing.
+    last_factor: f32,
     /// Set by the quit hotkey; when true the window closes.
     quit: Arc<AtomicBool>,
 }
@@ -198,8 +202,10 @@ impl eframe::App for Overlay {
             }
         }
 
-        // Repaint faster while the fade is still animating.
-        let animating = factor < 0.999;
+        // Repaint fast only while the fade is actually changing — a settled
+        // (fully faded) panel must not keep repainting at 20 fps.
+        let animating = motion::fade_animating(factor, self.last_factor);
+        self.last_factor = factor;
         ctx.request_repaint_after(Duration::from_millis(if animating { 50 } else { 250 }));
     }
 }

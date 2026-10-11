@@ -18,6 +18,19 @@
   **Ctrl+Alt+H** to close it.
 - **Demo mode.** `MINIHUD_DEMO=1` feeds synthetic, animated values, so the
   overlay (and its themes) can be previewed without hardware or the LHM DLL.
+- **Densities + sparkline.** `zen` (FPS + one hero metric), `standard` (FPS +
+  CPU / RAM / GPU), `full` (every field plus an FPS sparkline); `metrics`
+  overrides `density` with an explicit row list.
+- **Live FPS in the overlay.** `--gui` follows the foreground target (or
+  `--match <glob>` / `target` in config, `--follow-secs <n>` to bound it) and
+  shows FPS + 1% low; the readout clears when the target is lost and the panel
+  names the followed process.
+- **Quiet motion.** Changed numbers roll to their new values; the panel fades
+  after `fade_idle_secs` and repaints slowly once settled.
+
+### Fixes
+
+- Settled (fully faded) overlay no longer repaints at 20 fps.
 
 ## 1.0.0
 
