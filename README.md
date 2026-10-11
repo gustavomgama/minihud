@@ -9,9 +9,9 @@ A **headless Windows backend** that shows hardware stats and FPS:
    spawned `PresentMon.exe`. This is **tier 0**: no DLL injection, no game hook,
    nothing loaded into the target, so it is **anti-cheat-safe by construction**.
 
-The default build has **no UI, no overlay, and no rendering**: minihud observes
-the target and prints numbers. An optional **OSD overlay** is available behind
-the `gui` feature — see [OSD overlay](#osd-overlay---gui).
+A bare run opens the **OSD overlay** — see [OSD overlay](#osd-overlay-default).
+`--follow` and `--stats-only` select the headless console modes instead, which
+print lines like:
 
 ```
 CPU 12% 55C 45W 4200MHz | RAM 8192/16384MB | GPU 30% 60C 120W 1800x7000MHz | VRAM 4096/8192MB [AMD Ryzen 7 5800X / NVIDIA GeForce RTX 3070]  |  pid 23996: 84.3 fps  11.87 ms  1% low 61.2
@@ -121,15 +121,15 @@ does not stage.
 target\debug\minihud.exe --stats-only   # live status line (updates in place); Ctrl+C to stop
 ```
 
-### FPS (default, tier 0)
+### FPS console mode (tier 0)
 
-By default `minihud.exe` **follows the foreground process** and shows its
-**fps/frametime + 1% low** beside the hardware stats on one self-updating line,
-read **out-of-process over ETW**. Nothing is injected:
+`--follow` shows the foreground target's **fps/frametime + 1% low** beside the
+hardware stats on one self-updating line, read **out-of-process over ETW**.
+Nothing is injected:
 
 ```powershell
-target\debug\minihud.exe                          # follow the foreground target (default)
-target\debug\minihud.exe --match deadlock*.exe    # follow a target by name
+target\debug\minihud.exe --follow               # follow the foreground target on the console
+target\debug\minihud.exe --follow --match deadlock*.exe   # follow a target by name
 target\debug\minihud.exe --follow-secs 30         # bounded run
 target\debug\minihud.exe --fps-pid Overwatch      # explicit fps target
 target\debug\minihud.exe --fps-poll 250           # fps refresh cadence in ms (average window is fixed at 500)
@@ -144,26 +144,26 @@ the ETW session, the fps reads `--` and the run keeps going.
 ## CLI reference
 
 ```text
-minihud                                    show the foreground target's fps + hardware stats (default)
+minihud                                    show the OSD overlay (default)
 minihud --stats-only                       print hardware stats only (no fps)
-minihud --gui                              show the OSD overlay (included in cargo xtask build)
+minihud --gui [--match <glob>] [--follow-secs <n>]
 minihud --follow [--match <glob>] [--follow-secs <n>]
 minihud -h | --help                        print help
 
 <pid|name> is a numeric pid or a process image name (case-insensitive, `.exe`
 optional): `Overwatch`, `overwatch.exe`, or `1234` all work.
 
-FPS (default; tier 0, ETW, never injects):
+FPS (tier 0, ETW, never injects):
 --fps / --no-fps             enable / disable the ETW fps readout (default: on).
 --fps-poll <n>               fps refresh cadence in ms (default 500): how often the readout
                              redraws and the target is re-resolved. The average is always over
                              a fixed 500 ms window.
 --fps-pid <pid|name>         explicit fps target (default: the followed/foreground target).
 --follow                     follow the foreground target (or --match) and show its fps via
-                             ETW. This is the DEFAULT; Ctrl+C to stop. Needs elevation (ETW).
---match <glob>               with --follow, target an exe by case-insensitive glob instead of
-                             the foreground process (e.g. deadlock*.exe).
---follow-secs <n>            with --follow, stop after <n> seconds (default: until Ctrl+C).
+                             ETW on the console. Ctrl+C to stop. Needs elevation (ETW).
+--match <glob>               with --follow or --gui, target an exe by case-insensitive glob
+                             instead of the foreground process (e.g. deadlock*.exe).
+--follow-secs <n>            with --follow or --gui, stop after <n> seconds (default: until Ctrl+C).
 --hardware-poll <n>          hardware-stats poll cadence in ms (default 500). One value drives
                              both the status-line refresh and the LHM bridge tick.
 --stats                      log the achieved hw/fps updates-per-second once a second.
@@ -172,11 +172,12 @@ FPS (default; tier 0, ETW, never injects):
 MINIHUD_NO_ELEVATE=1         skip the UAC self-elevation (headless tests/diagnostics).
 ```
 
-## OSD overlay (`--gui`)
+## OSD overlay (default)
 
-An optional, fully customizable on-screen display: a transparent, always-on-top,
+A fully customizable on-screen display: a transparent, always-on-top,
 **click-through** panel (built with `egui`/`eframe`) showing FPS plus CPU / GPU /
-RAM. It is **off by default** so the headless build stays lean.
+RAM. It opens on a bare run; `--follow` and `--stats-only` select the headless
+console modes instead.
 
 | Zen | Standard |
 |---|---|
@@ -191,9 +192,9 @@ animated values, so you can preview the overlay — and its themes — without a
 hardware or the LHM DLL.
 
 ```powershell
-cargo xtask build            # includes the --gui overlay; or: cargo build --features gui
-target\debug\minihud.exe --gui
-target\debug\minihud.exe --gui --match deadlock*.exe   # follow a named target
+cargo xtask build            # includes the overlay; or: cargo build --features gui
+target\debug\minihud.exe                       # open the overlay
+target\debug\minihud.exe --match deadlock*.exe   # overlay following a named target
 ```
 
 Configured entirely by an optional `minihud.toml` (see `minihud.toml.example`):

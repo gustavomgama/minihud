@@ -1,10 +1,9 @@
-//! minihud — hardware stats + ETW FPS backend.
+//! minihud — hardware stats + ETW FPS backend, with an OSD overlay.
 //!
-//! Prints LibreHardwareMonitor hardware stats on an interval (via
-//! `tools/lhm/lhm-bridge.ps1`) and, by default, shows the foreground target's
-//! FPS from **ETW present events** (tier 0, no injection) — see the `fps`
-//! module. FPS/log/hardware output shares one console. There is no UI or
-//! overlay; `--stats-only` shows hardware only.
+//! Shows the OSD overlay natively: FPS from **ETW present events** (tier 0, no
+//! injection) plus LibreHardwareMonitor hardware stats (via
+//! `tools/lhm/lhm-bridge.ps1`) — see the `fps` and `hw` modules. `--follow`
+//! and `--stats-only` select the headless console modes instead.
 
 mod console;
 mod fps;
@@ -150,7 +149,14 @@ fn select_mode(args: &[String]) -> Mode {
     if args.iter().any(|a| a == "--stats-only") {
         return Mode::StatsOnly;
     }
-    Mode::Follow(hook::follow::parse_follow(args).unwrap_or_default())
+    if args.iter().any(|a| a == "--follow") {
+        return Mode::Follow(hook::follow::parse_follow(args).unwrap_or_default());
+    }
+    // No mode flag: the overlay is native when compiled in, else console follow.
+    #[cfg(feature = "gui")]
+    return Mode::Gui(hook::follow::parse_follow(args).unwrap_or_default());
+    #[cfg(not(feature = "gui"))]
+    return Mode::Follow(hook::follow::parse_follow(args).unwrap_or_default());
 }
 
 /// Print a capture error and exit non-zero, else return `Ok`.
@@ -612,9 +618,9 @@ fn usage() -> String {
         "minihud {version} — LibreHardwareMonitor hardware backend + ETW fps\n\
          \n\
          USAGE:\n\
-         \x20   minihud                                  show the foreground target's fps + hardware stats (default)\n\
+         \x20   minihud                                  show the OSD overlay (default)\n\
          \x20   minihud --stats-only                     print hardware stats only (no fps)\n\
-         \x20   minihud --gui [--match <glob>]           show the OSD overlay window (needs --features gui)\n\
+         \x20   minihud --gui [--match <glob>] [--follow-secs <n>]\n\
          \x20   minihud --follow [--match <glob>] [--follow-secs <n>]\n\
          \x20   minihud -h | --help                      print this help\n\
          \n\
@@ -622,7 +628,7 @@ fn usage() -> String {
          `.exe` optional: `Overwatch`, `overwatch.exe`, or `1234`).\n\
          \n\
          FPS (default; tier 0, ETW, never injects):\n\
-         \x20   The default and --follow show the target's fps/frametime + 1% low from\n\
+         \x20   The overlay (the default) and --follow show the target's fps/frametime + 1% low from\n\
          \x20   ETW present events via a spawned PresentMon.exe — no dll injection or game\n\
          \x20   hook of any kind. If an anti-cheat blocks the ETW session the fps reads `--`\n\
          \x20   and the run continues. The readout is the average fps over a fixed\n\
@@ -634,7 +640,7 @@ fn usage() -> String {
          \x20   --fps-pid <pid|name>       explicit fps target (default: the followed/foreground\n\
          \x20                              target).\n\
          \x20   --follow                   follow the foreground target (or --match) and show its\n\
-         \x20                              fps via ETW (needs elevation for ETW). This is the DEFAULT;\n\
+         \x20                              fps via ETW on the console (needs elevation for ETW).\n\
          \x20                              Ctrl+C to stop.\n\
          \x20   --match <glob>             with --follow or --gui, target an exe by case-insensitive glob\n\
          \x20                              instead of the foreground process (e.g. deadlock*.exe).\n\
@@ -782,6 +788,30 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "gui")]
+    fn select_mode_defaults_to_gui_with_console_opt_outs() {
+        // Catches: a bare run not opening the overlay (the user must discover
+        // `--gui`), or `--follow` / `--stats-only` losing their console modes.
+        use hook::follow::FollowArgs;
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(select_mode(&a(&[])), Mode::Gui(FollowArgs::default()));
+        assert_eq!(
+            select_mode(&a(&["--follow"])),
+            Mode::Follow(FollowArgs::default())
+        );
+        assert_eq!(select_mode(&a(&["--stats-only"])), Mode::StatsOnly);
+        // `--match` alone follows into the overlay with the glob set.
+        assert_eq!(
+            select_mode(&a(&["--match", "deadlock*.exe"])),
+            Mode::Gui(FollowArgs {
+                match_glob: Some("deadlock*.exe".into()),
+                secs: None,
+            })
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "gui"))]
     fn select_mode_defaults_to_follow_and_stats_only_wins() {
         // Catches: the default silently regressing to stats-only, or
         // `--stats-only` losing to the default follow. With the capture modes

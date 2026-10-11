@@ -82,6 +82,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 26. [x] Explicit metric list: `metrics = [...]` overrides `density` (`model::rows_named`).
 27. [x] Settled fade stops repainting at 20 fps (`motion::fade_animating`).
 28. [x] `cargo xtask build` includes the overlay by default (no `--features` flag).
+29. [x] Bare run opens the overlay natively (no `--gui` flag).
 
 ## Progress log
 
@@ -244,3 +245,8 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   build/run/dist` include `--gui` with no flags; an explicit `--features` still
   wins. README/CHANGELOG/example updated. **Verified live**: `cargo run -p xtask
   -- build` produced a gui-enabled exe. Gate green (196 tests, both features).
+- 2026-10-11: Native overlay (item 29). A bare run opens the OSD: `select_mode`
+  defaults to `Gui` when compiled with the feature (TDD, headless builds still
+  default to console follow); explicit `--follow` / `--stats-only` opt out to
+  the console. usage(), README, CHANGELOG updated. **Verified live**: `--help`
+  shows the overlay as default. Gate green (196 tests, both features).
