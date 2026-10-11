@@ -72,10 +72,11 @@ jobs:
         run: cargo llvm-cov --workspace --lcov --output-path lcov.info
 
       - name: CRAP gate (cargo-crap)
-        # Excludes the entry point / build script / xtask; allows the tier-0 ETW
-        # live-only functions that only run against a real PresentMon child (no
-        # in-process test can exercise them).
-        run: cargo crap --lcov lcov.info --exclude 'src/main.rs' --exclude 'build.rs' --exclude 'xtask/**' --allow 'run' --allow 'read_frames' --allow 'session' --allow 'supervise' --threshold 30 --fail-above
+        # Excludes the entry point / build script / xtask / the feature-gated GUI
+        # glue (egui painting, no in-process test); allows the tier-0 ETW live-only
+        # functions that only run against a real PresentMon child (no in-process
+        # test can exercise them).
+        run: cargo crap --lcov lcov.info --exclude 'src/main.rs' --exclude 'build.rs' --exclude 'xtask/**' --exclude 'src/gui/app.rs' --allow 'run' --allow 'read_frames' --allow 'session' --allow 'supervise' --threshold 30 --fail-above
 
       - name: duplication gate (jscpd)
         run: jscpd src --min-lines 5 --threshold 5

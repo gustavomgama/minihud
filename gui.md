@@ -122,3 +122,8 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   animate to their new value via `ctx.animate_value_with_time` (0.28 s), so a
   change settles instead of jumping. Smoke-tested: renders clean, no panic.
   Gate green (175 tests, both feature sets).
+- 2026-10-11: CI fix. Ran the real gates: `cargo crap` scored `Overlay::ui`
+  (src/gui/app.rs, feature-gated egui glue, 0% coverage) at CRAP 56 → **CI would
+  have failed**. Excluded `src/gui/app.rs` from CRAP in `tools/critic.ps1` and
+  `.github/workflows/audit.yml`, alongside the entry point. Re-ran: CRAP ✓ (0
+  exceed), jscpd ✓ (0.73%), cargo-machete ✓.

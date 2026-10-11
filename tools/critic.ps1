@@ -26,11 +26,12 @@ if ($LASTEXITCODE -ne 0) { $fail += 'coverage' }
 
 Write-Host "== CRAP (cargo-crap, threshold $MaxCrap) ==" -ForegroundColor Cyan
 # Score the exercised library code. `--exclude` drops the entry point, build
-# script and xtask. `--allow` hides the tier-0 ETW live-only functions that only
-# run against a real PresentMon child (`run`/`read_frames`/`session`/
-# `supervise`) — no in-process unit test can exercise them, so a complex-but-0%-
-# covered function must not red the gate.
-cargo crap --lcov lcov.info --exclude 'src/main.rs' --exclude 'build.rs' --exclude 'xtask/**' --allow 'run' --allow 'read_frames' --allow 'session' --allow 'supervise' --threshold $MaxCrap --fail-above
+# script, xtask, and the feature-gated GUI glue (`src/gui/app.rs` — egui
+# painting with no in-process test). `--allow` hides the tier-0 ETW live-only
+# functions that only run against a real PresentMon child (`run`/`read_frames`/
+# `session`/`supervise`) — no in-process unit test can exercise them, so a
+# complex-but-0%-covered function must not red the gate.
+cargo crap --lcov lcov.info --exclude 'src/main.rs' --exclude 'build.rs' --exclude 'xtask/**' --exclude 'src/gui/app.rs' --allow 'run' --allow 'read_frames' --allow 'session' --allow 'supervise' --threshold $MaxCrap --fail-above
 if ($LASTEXITCODE -ne 0) { $fail += "crap>$MaxCrap" }
 
 Write-Host "== duplication (jscpd, threshold $MaxDupPct%) ==" -ForegroundColor Cyan
