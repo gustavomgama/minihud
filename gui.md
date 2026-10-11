@@ -65,6 +65,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 16. [x] Full-density FPS sparkline (`gui::spark` + fps history in the snapshot).
 17. [x] Demo mode (`MINIHUD_DEMO=1`) + README screenshots of four variations.
 18. [x] Design pass from the screenshots: compact memory, hero rework, temp tints.
+19. [x] Threshold tune: load amber at 70%, red at 85%; temps green<65, amber<80.
 
 ## Progress log
 
@@ -170,3 +171,8 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   thermal tints on temperature values (`theme::temp_color`, `Metric.tint`) so a
   hot reading reads at a glance like a load bar. All TDD. Re-captured the four
   README screenshots. Gate green (186 tests, both feature sets).
+- 2026-10-11: Threshold tune (item 19). A normal ~60% load read amber; the bands
+  are now green <70%, amber <85%, red ≥85% (so a value rounding to "90%" already
+  reads alarm and the number never disagrees with the bar). Temps get their own
+  bands (green <65 °C, amber <80 °C, red above). Removed the sparkline's stray
+  background box. Re-captured the two Full screenshots. Gate green (187 tests).

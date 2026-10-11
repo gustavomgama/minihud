@@ -35,9 +35,12 @@ pub fn thermal(temp_c: f32) -> Rgb {
     lerp([80, 180, 255], [255, 90, 60], t)
 }
 
-/// The bar tone for a `0..=1` load: green, then amber, then red.
+/// The bar tone for a `0..=1` load: green, then amber past 70%, then red past
+/// 85%. The bands are deliberately wide, so a normal load stays calm and only a
+/// genuinely pegged one alarms — and a value that rounds to "90%" already reads
+/// alarm, so the number and the bar never disagree.
 pub fn load_color(fraction: f32) -> Rgb {
-    if fraction < 0.6 {
+    if fraction < 0.7 {
         [60, 200, 120]
     } else if fraction < 0.85 {
         [235, 175, 45]
@@ -46,10 +49,16 @@ pub fn load_color(fraction: f32) -> Rgb {
     }
 }
 
-/// A temperature tone: calm green when cool, amber when warm, red when hot, so
-/// a temperature reads at a glance like a load bar does.
+/// A temperature tone: green below 65 °C, amber to 80 °C, red above, so a
+/// temperature reads at a glance like a load bar does.
 pub fn temp_color(temp_c: f32) -> Rgb {
-    load_color(((temp_c - 40.0) / 50.0).clamp(0.0, 1.0))
+    if temp_c < 65.0 {
+        [60, 200, 120]
+    } else if temp_c < 80.0 {
+        [235, 175, 45]
+    } else {
+        [235, 70, 70]
+    }
 }
 
 /// The accent to draw with: thermal follows the temperature, the rest are
@@ -80,6 +89,10 @@ mod tests {
     fn is_bluish(c: Rgb) -> bool {
         c[2] > c[0]
     }
+    /// A true alarm tone (red), distinct from amber: red carries little green.
+    fn is_alarm(c: Rgb) -> bool {
+        c[0] > 200 && c[1] < 120
+    }
 
     #[test]
     fn load_color_goes_calm_amber_alarm() {
@@ -94,6 +107,19 @@ mod tests {
         );
         let high = load_color(0.95);
         assert!(is_reddish(high), "high load must read alarm: {high:?}");
+        // A value that rounds to "90%" must already read alarm, or the number
+        // and the bar disagree.
+        assert!(is_alarm(load_color(0.88)), "88% must read alarm");
+    }
+
+    #[test]
+    fn a_moderate_load_stays_calm() {
+        // Catches: amber firing too early, so a normal ~65% load looks alarming.
+        let moderate = load_color(0.65);
+        assert!(
+            is_greenish(moderate),
+            "65% must still read calm: {moderate:?}"
+        );
     }
 
     #[test]

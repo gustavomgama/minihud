@@ -272,11 +272,6 @@ fn sparkline(ui: &mut egui::Ui, history: &[f32], accent: egui::Color32, scale: f
         })
         .collect();
     let painter = ui.painter();
-    painter.rect_filled(
-        rect,
-        egui::CornerRadius::same(2),
-        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 10),
-    );
     painter.add(egui::Shape::line(
         points,
         egui::Stroke::new((1.5 * scale).max(1.0), accent),
