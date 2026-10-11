@@ -193,17 +193,22 @@ fn hero(ui: &mut egui::Ui, snap: &Snapshot, accent: egui::Color32, scale: f32) {
                 .monospace()
                 .color(accent),
         );
-        ui.label(egui::RichText::new("FPS").size(12.0 * scale).weak());
-        if let Some(low) = snap.one_percent_low {
-            let shown =
-                ui.ctx()
-                    .animate_value_with_time(egui::Id::new("roll.low"), low as f32, ROLL_SECS);
-            ui.label(
-                egui::RichText::new(format!("1% {shown:.0}"))
-                    .size(11.0 * scale)
-                    .weak(),
-            );
-        }
+        ui.vertical(|ui| {
+            ui.add_space(4.0 * scale);
+            ui.label(egui::RichText::new("FPS").size(12.0 * scale).weak());
+            if let Some(low) = snap.one_percent_low {
+                let shown = ui.ctx().animate_value_with_time(
+                    egui::Id::new("roll.low"),
+                    low as f32,
+                    ROLL_SECS,
+                );
+                ui.label(
+                    egui::RichText::new(format!("1% low {shown:.0}"))
+                        .size(10.0 * scale)
+                        .weak(),
+                );
+            }
+        });
     });
 }
 
@@ -212,7 +217,11 @@ fn row(ui: &mut egui::Ui, m: &Metric, scale: f32) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(m.label).size(11.0 * scale).weak());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(egui::RichText::new(&m.value).size(13.0 * scale).monospace());
+            let mut value = egui::RichText::new(&m.value).size(13.0 * scale).monospace();
+            if let Some(tint) = m.tint {
+                value = value.color(to_color(tint));
+            }
+            ui.label(value);
         });
     });
     if let Some(fraction) = m.fraction {

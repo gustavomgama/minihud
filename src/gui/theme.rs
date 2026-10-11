@@ -46,6 +46,12 @@ pub fn load_color(fraction: f32) -> Rgb {
     }
 }
 
+/// A temperature tone: calm green when cool, amber when warm, red when hot, so
+/// a temperature reads at a glance like a load bar does.
+pub fn temp_color(temp_c: f32) -> Rgb {
+    load_color(((temp_c - 40.0) / 50.0).clamp(0.0, 1.0))
+}
+
 /// The accent to draw with: thermal follows the temperature, the rest are
 /// fixed. A thermal accent with no reading falls back to [`NEUTRAL`].
 pub fn resolve_accent(a: Accent, temp_c: Option<f32>) -> Rgb {
@@ -129,5 +135,18 @@ mod tests {
             resolve_accent(Accent::Cyan, Some(90.0)),
             accent_color(Accent::Cyan)
         );
+    }
+
+    #[test]
+    fn temp_color_reads_cool_then_hot() {
+        // Catches: a temp tint that never changes (the "reads hot at a glance"
+        // promise lost) or one inverted (a hot reading showing green).
+        assert!(is_greenish(temp_color(45.0)));
+        let warm = temp_color(72.0);
+        assert!(
+            warm[0] > warm[2] && warm[1] > warm[2],
+            "amber at 72: {warm:?}"
+        );
+        assert!(is_reddish(temp_color(88.0)));
     }
 }

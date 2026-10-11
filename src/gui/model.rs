@@ -8,6 +8,7 @@
 use crate::hw::HwStats;
 
 use super::config::Density;
+use super::theme::{self, Rgb};
 
 /// One rendered metric row.
 #[derive(Debug, Clone, PartialEq)]
@@ -18,6 +19,8 @@ pub struct Metric {
     pub value: String,
     /// A `0..=1` fill fraction for a bar, when the metric is a proportion.
     pub fraction: Option<f32>,
+    /// An explicit text tint (temperature rows), else the theme default.
+    pub tint: Option<Rgb>,
 }
 
 /// The display rows for one sample, in display order.
@@ -27,36 +30,43 @@ pub fn rows(s: &HwStats) -> Vec<Metric> {
             label: "CPU",
             value: pct(s.cpu_percent),
             fraction: Some((s.cpu_percent / 100.0).clamp(0.0, 1.0)),
+            tint: None,
         },
         Metric {
             label: "CPU temp",
             value: opt_f32(s.cpu_temp_c, "°C"),
             fraction: None,
+            tint: s.cpu_temp_c.map(theme::temp_color),
         },
         Metric {
             label: "RAM",
-            value: pair_mb(s.ram_used_mb, s.ram_total_mb),
+            value: pair_mem(s.ram_used_mb, s.ram_total_mb),
             fraction: ratio(s.ram_used_mb, s.ram_total_mb),
+            tint: None,
         },
         Metric {
             label: "GPU",
             value: s.gpu_percent.map(pct).unwrap_or_else(dashes),
             fraction: s.gpu_percent.map(|p| (p / 100.0).clamp(0.0, 1.0)),
+            tint: None,
         },
         Metric {
             label: "GPU temp",
             value: opt_f32(s.gpu_temp_c, "°C"),
             fraction: None,
+            tint: s.gpu_temp_c.map(theme::temp_color),
         },
         Metric {
             label: "VRAM",
-            value: pair_mb(s.gpu_vram_used_mb, s.gpu_vram_total_mb),
+            value: pair_mem(s.gpu_vram_used_mb, s.gpu_vram_total_mb),
             fraction: ratio(s.gpu_vram_used_mb, s.gpu_vram_total_mb),
+            tint: None,
         },
         Metric {
             label: "GPU power",
             value: opt_f32(s.gpu_power_w, "W"),
             fraction: None,
+            tint: None,
         },
     ]
 }
@@ -90,9 +100,13 @@ fn opt_f32(v: Option<f32>, unit: &str) -> String {
     v.map(|v| format!("{v:.0}{unit}")).unwrap_or_else(dashes)
 }
 
-/// `used/total MB`, or `--` unless both are known.
-fn pair_mb(used: Option<u64>, total: Option<u64>) -> String {
+/// `used/total` with a single unit — GB above a GiB, else MB — or `--` unless
+/// both are known.
+fn pair_mem(used: Option<u64>, total: Option<u64>) -> String {
     match (used, total) {
+        (Some(u), Some(t)) if t >= 1024 => {
+            format!("{:.1}/{:.1} GB", u as f32 / 1024.0, t as f32 / 1024.0)
+        }
         (Some(u), Some(t)) => format!("{u}/{t} MB"),
         _ => dashes(),
     }
@@ -196,13 +210,13 @@ mod tests {
             ..HwStats::default()
         };
         let m = row(&rows(&s), "RAM").clone();
-        assert_eq!(m.value, "8192/16384 MB");
+        assert_eq!(m.value, "8.0/16.0 GB");
         assert_eq!(m.fraction, Some(0.5));
     }
 
     #[test]
     fn ram_row_is_dashes_without_both_numbers() {
-        // Catches: showing "8192/-- MB" (or a bar) when the total is unknown.
+        // Catches: showing "8192/--" (or a bar) when the total is unknown.
         let s = HwStats {
             ram_used_mb: Some(8192),
             ..HwStats::default()
@@ -210,6 +224,17 @@ mod tests {
         let m = row(&rows(&s), "RAM").clone();
         assert_eq!(m.value, "--");
         assert_eq!(m.fraction, None);
+    }
+
+    #[test]
+    fn small_memory_stays_in_megabytes() {
+        // Catches: forcing GB on small values (a confusing "0.5/0.9 GB").
+        let s = HwStats {
+            ram_used_mb: Some(512),
+            ram_total_mb: Some(900),
+            ..HwStats::default()
+        };
+        assert_eq!(row(&rows(&s), "RAM").value, "512/900 MB");
     }
 
     #[test]
@@ -221,7 +246,7 @@ mod tests {
             ..HwStats::default()
         };
         let m = row(&rows(&s), "VRAM").clone();
-        assert_eq!(m.value, "3000/8192 MB");
+        assert_eq!(m.value, "2.9/8.0 GB");
         assert_eq!(m.fraction, Some(3000.0 / 8192.0));
     }
 
@@ -258,5 +283,30 @@ mod tests {
             labels(&rows_for(Density::Full, &HwStats::default())),
             labels(&all)
         );
+    }
+
+    #[test]
+    fn temperature_rows_carry_a_thermal_tint() {
+        // Catches: a temperature rendering in the default colour (the "reads hot
+        // at a glance" promise lost) or a missing reading carrying a tint.
+        let hot = HwStats {
+            gpu_temp_c: Some(88.0),
+            ..HwStats::default()
+        };
+        assert_eq!(
+            row(&rows(&hot), "GPU temp").tint,
+            Some(theme::temp_color(88.0)),
+            "a hot temp must carry the thermal tint"
+        );
+        let cold_cpu = HwStats {
+            cpu_temp_c: Some(45.0),
+            ..HwStats::default()
+        };
+        assert_eq!(
+            row(&rows(&cold_cpu), "CPU temp").tint,
+            Some(theme::temp_color(45.0))
+        );
+        assert_eq!(row(&rows(&HwStats::default()), "GPU temp").tint, None);
+        assert_eq!(row(&rows(&HwStats::default()), "CPU").tint, None);
     }
 }

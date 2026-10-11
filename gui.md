@@ -64,6 +64,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 15. [x] Clear the fps readout when the target is lost; log target changes.
 16. [x] Full-density FPS sparkline (`gui::spark` + fps history in the snapshot).
 17. [x] Demo mode (`MINIHUD_DEMO=1`) + README screenshots of four variations.
+18. [x] Design pass from the screenshots: compact memory, hero rework, temp tints.
 
 ## Progress log
 
@@ -164,3 +165,8 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   `MINIHUD_DEMO=1` makes `run_gui` feed them instead of the real pollers. Captured
   four variations through egui-mcp into `docs/` (zen/standard/full/full-magenta)
   and linked them in the README. Gate green (183 tests, both feature sets).
+- 2026-10-11: Design pass from the screenshots (item 18). Compact memory
+  (`9.2/16.0 GB`), a reworked hero (big number + stacked `FPS` / `1% low`), and
+  thermal tints on temperature values (`theme::temp_color`, `Metric.tint`) so a
+  hot reading reads at a glance like a load bar. All TDD. Re-captured the four
+  README screenshots. Gate green (186 tests, both feature sets).
