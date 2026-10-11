@@ -76,10 +76,13 @@ fn main() -> Result<()> {
             Ok(())
         }
         // The OSD overlay window (feature `gui`).
-        Mode::Gui(match_glob) => {
+        Mode::Gui(follow) => {
             ensure_elevated();
             let fps_opts = fps::parse_fps_opts(&args);
-            report("--gui", run_gui(hw, fps_opts, match_glob))
+            report(
+                "--gui",
+                run_gui(hw, fps_opts, follow.match_glob, follow.secs),
+            )
         }
         // Default: follow the foreground process (or `--match`), showing fps +
         // hardware stats on the same line. `--fps-poll` drives the target poll.
@@ -133,15 +136,16 @@ fn parse_hw_opts(args: &[String]) -> HwOpts {
 enum Mode {
     StatsOnly,
     Follow(hook::follow::FollowArgs),
-    /// The overlay, carrying the optional `--match` glob it should follow.
-    Gui(Option<String>),
+    /// The overlay, carrying its optional `--match` glob and `--follow-secs`
+    /// bound.
+    Gui(hook::follow::FollowArgs),
 }
 
 /// Resolve the run mode: `--gui` wins, then `--stats-only`, else the default
 /// `--follow`.
 fn select_mode(args: &[String]) -> Mode {
     if args.iter().any(|a| a == "--gui") {
-        return Mode::Gui(hook::follow::parse_follow(args).and_then(|f| f.match_glob));
+        return Mode::Gui(hook::follow::parse_follow(args).unwrap_or_default());
     }
     if args.iter().any(|a| a == "--stats-only") {
         return Mode::StatsOnly;
@@ -188,6 +192,7 @@ fn run_gui(
     hw: HwOpts,
     fps_opts: fps::FpsOpts,
     match_glob: Option<String>,
+    secs: Option<u64>,
 ) -> std::result::Result<(), String> {
     let cfg = gui::config::resolve();
     // A `--match` on the command line wins; else the config's pinned target.
@@ -196,6 +201,16 @@ fn run_gui(
     let stop = Arc::new(AtomicBool::new(false));
     let quit = Arc::new(AtomicBool::new(false));
     spawn_quit_hotkey(quit.clone());
+
+    // `--follow-secs`: close the overlay after the bound (a timed run).
+    if let Some(secs) = secs {
+        tracing::info!("overlay: closing after {secs}s");
+        let quit = quit.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(secs));
+            quit.store(true, Ordering::SeqCst);
+        });
+    }
 
     // `MINIHUD_DEMO=1` feeds synthetic data so the overlay can be previewed (and
     // screenshotted) without hardware or the LHM DLL.
@@ -346,6 +361,7 @@ fn run_gui(
     _hw: HwOpts,
     _fps_opts: fps::FpsOpts,
     _match_glob: Option<String>,
+    _secs: Option<u64>,
 ) -> std::result::Result<(), String> {
     tracing::error!("--gui requires a build with the `gui` feature (cargo build --features gui)");
     std::process::exit(2);
@@ -617,7 +633,7 @@ fn usage() -> String {
          \x20                              Ctrl+C to stop.\n\
          \x20   --match <glob>             with --follow or --gui, target an exe by case-insensitive glob\n\
          \x20                              instead of the foreground process (e.g. deadlock*.exe).\n\
-         \x20   --follow-secs <n>          with --follow, stop after <n> seconds (default: until Ctrl+C).\n\
+         \x20   --follow-secs <n>          with --follow or --gui, stop after <n> seconds (default: until Ctrl+C).\n\
          \x20   --hardware-poll <n>        hardware-stats poll cadence in ms (default {hw_poll}). One\n\
          \x20                              value drives both the status-line refresh and the LHM\n\
          \x20                              bridge tick.\n\
@@ -642,21 +658,42 @@ mod tests {
     fn select_mode_recognizes_gui_and_lets_it_win() {
         // Catches: `--gui` being ignored (the overlay never launches) or losing
         // to `--stats-only` when both are passed.
+        use hook::follow::FollowArgs;
         let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(select_mode(&a(&["--gui"])), Mode::Gui(None));
-        assert_eq!(select_mode(&a(&["--gui", "--stats-only"])), Mode::Gui(None));
+        assert_eq!(
+            select_mode(&a(&["--gui"])),
+            Mode::Gui(FollowArgs::default())
+        );
+        assert_eq!(
+            select_mode(&a(&["--gui", "--stats-only"])),
+            Mode::Gui(FollowArgs::default())
+        );
     }
 
     #[test]
-    fn gui_carries_a_match_glob() {
-        // Catches: `--gui --match <glob>` silently ignoring the glob (the
-        // overlay would follow the foreground instead of the named target).
+    fn gui_carries_a_target_and_a_time_bound() {
+        // Catches: `--gui --match` / `--gui --follow-secs` silently ignored, so
+        // the overlay follows the foreground forever instead.
+        use hook::follow::FollowArgs;
         let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(
             select_mode(&a(&["--gui", "--match", "deadlock*.exe"])),
-            Mode::Gui(Some("deadlock*.exe".to_string()))
+            Mode::Gui(FollowArgs {
+                match_glob: Some("deadlock*.exe".to_string()),
+                secs: None
+            })
         );
-        assert_eq!(select_mode(&a(&["--gui"])), Mode::Gui(None));
+        assert_eq!(
+            select_mode(&a(&["--gui", "--follow-secs", "30"])),
+            Mode::Gui(FollowArgs {
+                match_glob: None,
+                secs: Some(30)
+            })
+        );
+        assert_eq!(
+            select_mode(&a(&["--gui"])),
+            Mode::Gui(FollowArgs::default())
+        );
     }
 
     #[test]

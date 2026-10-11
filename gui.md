@@ -69,6 +69,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 20. [x] Signature accent rail on the panel's left edge.
 21. [x] Fix `tools/audit.ps1` CRAP exclude; full audit now PASSes.
 22. [x] Anchor in the monitor work area (clears the taskbar; honours the origin).
+23. [x] `--gui --follow-secs <n>` bounds the overlay (was silently ignored).
 
 ## Progress log
 
@@ -195,3 +196,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   offsets correctly), and the app queries `SystemParametersInfoW(SPI_GETWORKAREA)`.
   **Verified live**: work area `1920x1032` (48px taskbar), panel anchored at
   `(1592, 828)` — clear of the taskbar. Gate green (188 tests, both features).
+- 2026-10-11: `--gui --follow-secs <n>` (item 23). The flag was silently ignored
+  in GUI mode; `Mode::Gui` now carries the full `FollowArgs` (glob + bound), and
+  a timer closes the overlay after the bound. **Verified live**: logs "closing
+  after 3s" and exits. Gate green (188 tests, both features).
