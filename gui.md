@@ -61,6 +61,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 12. [x] `--gui --match <glob>` targets a named exe instead of the foreground.
 13. [x] Quit hotkey: Ctrl+Alt+H closes the click-through overlay (`RegisterHotKey`).
 14. [x] Config `target`: pin a `--match` glob in `minihud.toml` (CLI wins).
+15. [x] Clear the fps readout when the target is lost; log target changes.
 
 ## Progress log
 
@@ -146,3 +147,8 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   Config test guards the field; example + README/CHANGELOG updated. Smoke-tested:
   the overlay starts clean with a `target`. Gate green (177 tests, both feature
   sets).
+- 2026-10-11: Fixed a stale-fps bug (item 15): when the target died the GUI loop
+  dropped the PresentMon feed but never cleared the snapshot, so the hero froze
+  on the last fps forever instead of reading `--`. `FeedAction::Stop` now clears
+  fps/1% low, and target changes log (`overlay: following X (pid N)` / `target
+  gone`), matching the headless mode. Gate green (177 tests, both feature sets).

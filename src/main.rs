@@ -244,6 +244,7 @@ fn fps_loop(
     let mut state = FeedState::default();
     let mut current: u32 = 0;
     let mut next = Instant::now();
+    let mut last_log: Option<String> = None;
 
     while !stop.load(Ordering::SeqCst) && console::should_run() {
         if Instant::now() >= next {
@@ -256,14 +257,22 @@ fn fps_loop(
             let action = feed_action(&mut state, selected.as_ref().map(|(pid, _)| *pid), current);
             match action {
                 FeedAction::Start => {
-                    if let Some((pid, _)) = selected {
+                    if let Some((pid, exe)) = selected {
+                        log_target(&mut last_log, format!("following {exe} (pid {pid})"));
                         feed = Some(PresentMonFeed::start(pid));
                         current = pid;
                     }
                 }
                 FeedAction::Stop => {
+                    log_target(&mut last_log, "target gone".to_string());
                     feed = None;
                     current = 0;
+                    // Clear the readout, so a dead target does not leave a stale
+                    // fps frozen on the overlay.
+                    if let Ok(mut snap) = data.lock() {
+                        snap.fps = None;
+                        snap.one_percent_low = None;
+                    }
                 }
                 FeedAction::Keep => {}
             }
@@ -328,6 +337,15 @@ fn spawn_quit_hotkey(quit: Arc<AtomicBool>) {
             }
         }
     });
+}
+
+/// Log an overlay target change once (the resolution repeats every tick).
+#[cfg(feature = "gui")]
+fn log_target(last: &mut Option<String>, msg: String) {
+    if last.as_deref() != Some(msg.as_str()) {
+        tracing::info!("overlay: {msg}");
+        *last = Some(msg);
+    }
 }
 
 /// Poll the hardware sensors at the configured cadence and update the status
