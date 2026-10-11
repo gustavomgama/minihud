@@ -57,6 +57,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
    hairline, monospace figures, live FPS feed in GUI mode.
 9. [x] Motion: idle fade (`fade_idle_secs`) + change signature (`gui::motion`).
 10. [x] `cargo xtask --features <list>` so the documented overlay build works.
+11. [x] Value roll: FPS / 1% low / bars animate to new values (`animate_value_with_time`).
 
 ## Progress log
 
@@ -117,3 +118,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 - 2026-10-11: `xtask dist` also ships `minihud.toml.example` so the config
   surface is discoverable in the shipping folder. Gate green (175 tests). PR
   blocked on `gh` auth (see Blocked).
+- 2026-10-11: Value roll (item 11): the hero FPS, 1% low and each load bar
+  animate to their new value via `ctx.animate_value_with_time` (0.28 s), so a
+  change settles instead of jumping. Smoke-tested: renders clean, no panic.
+  Gate green (175 tests, both feature sets).

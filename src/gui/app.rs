@@ -19,6 +19,10 @@ use super::motion;
 use super::theme::{self, Rgb};
 use crate::hw::HwStats;
 
+/// Seconds a changed number/bar takes to roll to its new value. Short enough to
+/// read as a settle, not an animation.
+const ROLL_SECS: f32 = 0.28;
+
 /// The live data the overlay draws. Producers update it through the shared
 /// handle handed to [`run`].
 #[derive(Clone, Debug, Default)]
@@ -151,15 +155,23 @@ impl eframe::App for Overlay {
     }
 }
 
-/// The single heroic number: FPS, with its unit and 1% low.
+/// The single heroic number: FPS, with its unit and 1% low. The number rolls to
+/// its new value instead of jumping.
 fn hero(ui: &mut egui::Ui, snap: &Snapshot, accent: egui::Color32, scale: f32) {
-    let fps = snap
-        .fps
-        .map(|f| format!("{f:.0}"))
-        .unwrap_or_else(|| "--".to_string());
+    let text = match snap.fps {
+        Some(target) => {
+            let shown = ui.ctx().animate_value_with_time(
+                egui::Id::new("roll.fps"),
+                target as f32,
+                ROLL_SECS,
+            );
+            format!("{shown:.0}")
+        }
+        None => "--".to_string(),
+    };
     ui.horizontal(|ui| {
         ui.label(
-            egui::RichText::new(fps)
+            egui::RichText::new(text)
                 .size(40.0 * scale)
                 .strong()
                 .monospace()
@@ -167,8 +179,11 @@ fn hero(ui: &mut egui::Ui, snap: &Snapshot, accent: egui::Color32, scale: f32) {
         );
         ui.label(egui::RichText::new("FPS").size(12.0 * scale).weak());
         if let Some(low) = snap.one_percent_low {
+            let shown =
+                ui.ctx()
+                    .animate_value_with_time(egui::Id::new("roll.low"), low as f32, ROLL_SECS);
             ui.label(
-                egui::RichText::new(format!("1% {low:.0}"))
+                egui::RichText::new(format!("1% {shown:.0}"))
                     .size(11.0 * scale)
                     .weak(),
             );
@@ -185,13 +200,17 @@ fn row(ui: &mut egui::Ui, m: &Metric, scale: f32) {
         });
     });
     if let Some(fraction) = m.fraction {
-        bar(ui, fraction, scale);
+        bar(ui, m.label, fraction, scale);
     }
 }
 
-/// A thin load bar: a dim track with a toned fill.
-fn bar(ui: &mut egui::Ui, fraction: f32, scale: f32) {
-    let fraction = fraction.clamp(0.0, 1.0);
+/// A thin load bar: a dim track with a toned fill. The fill rolls to its new
+/// width (and tone) instead of snapping.
+fn bar(ui: &mut egui::Ui, key: &str, fraction: f32, scale: f32) {
+    let target = fraction.clamp(0.0, 1.0);
+    let shown =
+        ui.ctx()
+            .animate_value_with_time(egui::Id::new(("roll.bar", key)), target, ROLL_SECS);
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(width, (4.0 * scale).max(2.0)),
@@ -201,8 +220,8 @@ fn bar(ui: &mut egui::Ui, fraction: f32, scale: f32) {
     let radius = egui::CornerRadius::same((2.0 * scale) as u8);
     painter.rect_filled(rect, radius, egui::Color32::from_gray(55));
     let mut fill = rect;
-    fill.set_width(rect.width() * fraction);
-    painter.rect_filled(fill, radius, to_color(theme::load_color(fraction)));
+    fill.set_width(rect.width() * shown);
+    painter.rect_filled(fill, radius, to_color(theme::load_color(shown)));
 }
 
 fn to_color(c: Rgb) -> egui::Color32 {
