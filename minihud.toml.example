@@ -32,6 +32,9 @@ scale = 1.0
 #   "thermal" | "cyan" | "amber" | "lime" | "magenta"
 accent = "thermal"
 
+# Optional explicit accent colour, overriding `accent`. #rgb or #rrggbb.
+# accent_color = "#ff8800"
+
 # Hardware poll cadence in ms, 100..=10000.
 poll_ms = 500
 

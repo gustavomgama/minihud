@@ -198,9 +198,9 @@ target\debug\minihud.exe --gui --match deadlock*.exe   # follow a named target
 
 Configured entirely by an optional `minihud.toml` (see `minihud.toml.example`):
 density (`zen` / `standard` / `full`), corner `anchor`, `margin_px`, `opacity`,
-`scale`, `accent` (thermal gradient or a fixed hue), `poll_ms`, `fade_idle_secs`,
-`target` (a `--match` glob to pin). No file = sensible defaults; out-of-range
-numbers clamp; unknown keys error.
+`scale`, `accent` (thermal gradient or a fixed hue) or a custom `accent_color`
+(`#rrggbb`), `poll_ms`, `fade_idle_secs`, `target` (a `--match` glob to pin).
+No file = sensible defaults; out-of-range numbers clamp; unknown keys error.
 
 The overlay is click-through with no taskbar entry — press **Ctrl+Alt+H** to
 close it.

@@ -50,6 +50,9 @@ pub struct Config {
     pub opacity: f32,
     pub scale: f32,
     pub accent: Accent,
+    /// An explicit accent colour (`#rgb` / `#rrggbb`), overriding `accent` when
+    /// set. An unparseable value falls back to `accent`.
+    pub accent_color: Option<String>,
     pub poll_ms: u64,
     pub fade_idle_secs: u64,
     /// Optional `--match` glob to follow, so a set-and-forget overlay can pin a
@@ -66,6 +69,7 @@ impl Default for Config {
             opacity: 0.72,
             scale: 1.0,
             accent: Accent::Thermal,
+            accent_color: None,
             poll_ms: 500,
             fade_idle_secs: 0,
             target: None,
@@ -161,6 +165,7 @@ mod tests {
         assert_eq!(c.opacity, 0.72);
         assert_eq!(c.scale, 1.0);
         assert_eq!(c.accent, Accent::Thermal);
+        assert_eq!(c.accent_color, None);
         assert_eq!(c.poll_ms, 500);
         assert_eq!(c.fade_idle_secs, 0);
         assert_eq!(c.target, None);
@@ -227,6 +232,14 @@ mod tests {
         assert_eq!(Config::default().target, None);
         let c = Config::from_toml("target = \"deadlock*.exe\"\n").expect("parse");
         assert_eq!(c.target.as_deref(), Some("deadlock*.exe"));
+    }
+
+    #[test]
+    fn accent_color_parses_and_defaults_to_none() {
+        // Catches: a custom accent being ignored, or a stray default colour.
+        assert_eq!(Config::default().accent_color, None);
+        let c = Config::from_toml("accent_color = \"#ff8800\"\n").expect("parse");
+        assert_eq!(c.accent_color.as_deref(), Some("#ff8800"));
     }
 
     fn temp_path(tag: &str) -> std::path::PathBuf {

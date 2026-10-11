@@ -116,7 +116,13 @@ impl eframe::App for Overlay {
         let factor = if base > 0.0 { faded / base } else { 1.0 };
 
         let temp = snap.stats.gpu_temp_c.or(snap.stats.cpu_temp_c);
-        let accent = to_color(theme::resolve_accent(self.cfg.accent, temp));
+        let accent = self
+            .cfg
+            .accent_color
+            .as_deref()
+            .and_then(theme::parse_hex)
+            .map(to_color)
+            .unwrap_or_else(|| to_color(theme::resolve_accent(self.cfg.accent, temp)));
         let alpha = (faded * 255.0).round() as u8;
         let bg = egui::Color32::from_rgba_unmultiplied(10, 12, 16, alpha);
         let hairline = egui::Stroke::new(

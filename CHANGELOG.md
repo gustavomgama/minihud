@@ -9,8 +9,8 @@
   build with `cargo build --features gui` (or `cargo xtask build --features gui`).
 - **`minihud.toml`.** Fully optional config: density (`zen` / `standard` /
   `full`), corner `anchor`, `margin_px`, `opacity`, `scale`, `accent`, `poll_ms`,
-  `fade_idle_secs`, `target`. Missing file = sensible defaults; out-of-range
-  numbers clamp; unknown keys error. See `minihud.toml.example`.
+  `fade_idle_secs`, `target`, `accent_color`. Missing file = sensible defaults;
+  out-of-range numbers clamp; unknown keys error. See `minihud.toml.example`.
 - **Thermal accent.** The accent hue drifts cool→warm with temperature; load bars
   run calm → amber → alarm.
 - **Quit hotkey.** The overlay is click-through with no taskbar entry; press

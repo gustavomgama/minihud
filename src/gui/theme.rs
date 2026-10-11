@@ -76,6 +76,23 @@ fn lerp(a: Rgb, b: Rgb, t: f32) -> Rgb {
     [mix(a[0], b[0]), mix(a[1], b[1]), mix(a[2], b[2])]
 }
 
+/// Parse a `#rgb` or `#rrggbb` colour (the `#` optional) into RGB. `None` for
+/// anything else, so a bad config value falls back rather than panics.
+pub fn parse_hex(s: &str) -> Option<Rgb> {
+    let h = s.strip_prefix('#').unwrap_or(s);
+    let pair = |i: usize| u8::from_str_radix(h.get(i..i + 2)?, 16).ok();
+    let nibble = |i: usize| {
+        u8::from_str_radix(h.get(i..i + 1)?, 16)
+            .ok()
+            .map(|v| v * 17)
+    };
+    match h.len() {
+        3 => Some([nibble(0)?, nibble(1)?, nibble(2)?]),
+        6 => Some([pair(0)?, pair(2)?, pair(4)?]),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +191,25 @@ mod tests {
             "amber at 72: {warm:?}"
         );
         assert!(is_reddish(temp_color(88.0)));
+    }
+
+    #[test]
+    fn parse_hex_reads_six_and_three_digit_colours() {
+        // Catches: a custom accent being ignored, or the short form mis-expanded
+        // (`#f80` must become `#ff8800`, not `#0f0800`).
+        assert_eq!(parse_hex("#ff8800"), Some([255, 136, 0]));
+        assert_eq!(parse_hex("ff8800"), Some([255, 136, 0]));
+        assert_eq!(parse_hex("#f80"), Some([255, 136, 0]));
+        assert_eq!(parse_hex("#FFFFFF"), Some([255, 255, 255]));
+    }
+
+    #[test]
+    fn parse_hex_rejects_garbage() {
+        // Catches: a malformed value silently becoming a colour (e.g. black) —
+        // it must be `None` so the caller falls back.
+        assert_eq!(parse_hex("nope"), None);
+        assert_eq!(parse_hex("#ff88"), None, "four digits is not a colour");
+        assert_eq!(parse_hex("#gggggg"), None, "non-hex digits");
+        assert_eq!(parse_hex(""), None);
     }
 }

@@ -71,6 +71,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 22. [x] Anchor in the monitor work area (clears the taskbar; honours the origin).
 23. [x] `--gui --follow-secs <n>` bounds the overlay (was silently ignored).
 24. [x] Show the followed target name (top-right) so set-and-forget is confirmable.
+25. [x] Custom accent colour: `accent_color = "#rrggbb"` (`theme::parse_hex`).
 
 ## Progress log
 
@@ -206,3 +207,8 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   tone, so a set-and-forget user can confirm the overlay tracks the right game.
   Demo mode names `deadlock.exe`. Re-captured all four README screenshots. Gate
   green (188 tests, both features).
+- 2026-10-11: Custom accent colour (item 25). `accent_color = "#rrggbb"` (or
+  `#rgb`) overrides the named accent; `theme::parse_hex` (TDD) rejects garbage
+  so a bad value falls back to `accent`. Example + README/CHANGELOG updated.
+  **Verified live**: `#ff8800` tints the hero and rail orange. Gate green
+  (191 tests, both features).
