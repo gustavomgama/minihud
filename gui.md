@@ -35,6 +35,19 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   headless build stays lean and CI stays green.
 - Entry: `minihud --gui` (works beside `--stats-only` / default follow).
 
+## Visual verification loop
+
+Every GUI change ends with eyes on the panel, not just green tests:
+
+1. Launch: `EGUI_INSPECTION=1 MINIHUD_NO_ELEVATE=1 MINIHUD_DEMO=1
+   ./target/debug/minihud.exe --follow-secs 180` (background).
+2. Attach the harness, then screenshot plus query the widget tree in one batch.
+3. Inspect against the vision: silence by default, one heroic number, tabular
+   figures, hairline geometry, thermal accent, courteous motion. Check the tree
+   for clipping (bounds inside the panel), stale values, and wrong tones.
+4. Record findings in the progress log; fix or file them before committing.
+5. Kill the demo instance (`taskkill /IM minihud.exe`) and disconnect.
+
 ## Blocked
 
 - **PR for `gui`** — `gh` is not authenticated on this machine
@@ -84,6 +97,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 28. [x] `cargo xtask build` includes the overlay by default (no `--features` flag).
 29. [x] Bare run opens the overlay natively (no `--gui` flag).
 30. [x] GUI runs keep the console hardware + fps status line.
+31. [x] Visual verification loop: screenshot + inspect every GUI change.
 
 ## Progress log
 
@@ -258,3 +272,8 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   `capture_label` (TDD), cleared when the target drops. **Verified live**:
   `MINIHUD_DEMO=1 minihud --follow-secs 4` printed live hardware + fps lines.
   Gate green (197 tests, both features).
+- 2026-10-11: Visual pass on the standard panel (item 31, first run of the
+  visual loop). Demo overlay screenshotted + tree-queried live: hero 128 FPS
+  with stacked `1% low`, `deadlock.exe` top-right, CPU/RAM/GPU rows with
+  green bars under sub-70% loads, accent rail on the left edge, no clipping
+  (panel 260x171). No defects; thermal hero reads warm-pink at ~70C as designed.
