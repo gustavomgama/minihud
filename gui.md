@@ -40,9 +40,9 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 1. [x] Isolated `gui` branch + worktree.
 2. [x] `gui::model` — row model, thresholds, `--` for missing. (TDD)
 3. [x] `gui::config` — TOML-backed, defaults = set-and-forget. (TDD)
-4. [ ] `gui::app` — eframe overlay: transparent, always-on-top, click-through.
+4. [x] `gui::app` — eframe overlay: transparent, always-on-top, click-through.
 5. [~] Accent theming done (`gui::theme`: thermal gradient + load thresholds);
-   densities (Zen/Standard/Full row selection) still pending.
+   densities (Zen/Standard/Full row selection) done (`gui::model::rows_for`).
 6. [ ] `--gui` wiring in `main.rs`; `cargo xtask` staging.
 7. [ ] README/CHANGELOG; commit + push `gui`.
 
@@ -59,3 +59,10 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 - 2026-10-11: `gui::theme` landed (TDD, 5 tests): thermal accent gradient
   (cool blue→warm red), load-threshold tone (calm/amber/alarm), fixed accent
   hues, thermal fallback when no temperature. Gate green (159 tests).
+- 2026-10-11: `gui::model::rows_for` (TDD, 3 tests): density → row subset.
+  `gui::app` (feature `gui`): transparent, undecorated, always-on-top,
+  click-through eframe overlay; hero FPS + labeled bars, `clear_color`
+  transparent, repaint at ~4 Hz. eframe 0.36 pinned, `default-features=false`
+  (`glow`+`default_fonts`+`inspection`+`accesskit`). Compiles and clippy-clean
+  with `--features gui`. Gate green (162 tests). NOT yet launched or wired to
+  live data (item 6).

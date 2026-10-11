@@ -8,3 +8,6 @@
 pub mod config;
 pub mod model;
 pub mod theme;
+
+#[cfg(feature = "gui")]
+pub mod app;
