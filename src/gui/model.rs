@@ -7,6 +7,8 @@
 
 use crate::hw::HwStats;
 
+use super::config::Density;
+
 /// One rendered metric row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Metric {
@@ -57,6 +59,21 @@ pub fn rows(s: &HwStats) -> Vec<Metric> {
             fraction: None,
         },
     ]
+}
+
+/// The rows for a density. Zen keeps only the hero metric; Standard keeps the
+/// three headline bars; Full keeps everything. FPS is not a row — it is drawn
+/// by the overlay itself, in every density.
+pub fn rows_for(density: Density, s: &HwStats) -> Vec<Metric> {
+    let keep: &[&str] = match density {
+        Density::Zen => &["GPU"],
+        Density::Standard => &["CPU", "RAM", "GPU"],
+        Density::Full => return rows(s),
+    };
+    rows(s)
+        .into_iter()
+        .filter(|m| keep.contains(&m.label))
+        .collect()
 }
 
 /// The missing-sensor placeholder. Every `--` in the overlay comes from here.
@@ -206,5 +223,40 @@ mod tests {
         let m = row(&rows(&s), "VRAM").clone();
         assert_eq!(m.value, "3000/8192 MB");
         assert_eq!(m.fraction, Some(3000.0 / 8192.0));
+    }
+
+    fn labels(metrics: &[Metric]) -> Vec<&'static str> {
+        metrics.iter().map(|m| m.label).collect()
+    }
+
+    #[test]
+    fn zen_shows_only_the_hero_metric() {
+        // Catches: Zen treating the density as a no-op (the whole "one glance"
+        // promise gone) or picking a metric that is often `--`.
+        assert_eq!(
+            labels(&rows_for(Density::Zen, &HwStats::default())),
+            ["GPU"]
+        );
+    }
+
+    #[test]
+    fn standard_shows_the_three_headline_bars() {
+        // Catches: Standard dropping one of the headline bars, or reordering
+        // them so CPU/GPU move around.
+        assert_eq!(
+            labels(&rows_for(Density::Standard, &HwStats::default())),
+            ["CPU", "RAM", "GPU"]
+        );
+    }
+
+    #[test]
+    fn full_shows_every_metric_in_display_order() {
+        // Catches: Full filtering anything out (the "everything" option showing
+        // less than everything) or reordering the rows.
+        let all = rows(&HwStats::default());
+        assert_eq!(
+            labels(&rows_for(Density::Full, &HwStats::default())),
+            labels(&all)
+        );
     }
 }
