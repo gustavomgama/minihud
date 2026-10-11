@@ -161,18 +161,28 @@ impl eframe::App for Overlay {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(used));
         }
 
-        // Anchor once, as soon as the monitor size is known.
+        // Anchor once, as soon as the work area is known.
         if !self.placed {
-            if let Some(mon) = ctx.input(|i| i.viewport().monitor_size) {
+            let work = work_area().or_else(|| {
+                ctx.input(|i| i.viewport().monitor_size)
+                    .map(|m| [0.0, 0.0, m.x, m.y])
+            });
+            if let Some(work) = work {
                 let pos = layout::anchor_pos(
                     self.cfg.anchor,
-                    [mon.x, mon.y],
+                    work,
                     [used.x, used.y],
                     self.cfg.margin_px as f32,
                 );
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
                     pos[0], pos[1],
                 )));
+                tracing::info!(
+                    "overlay: anchored at ({:.0}, {:.0}) in work area {:?}",
+                    pos[0],
+                    pos[1],
+                    work
+                );
                 self.placed = true;
             }
         }
@@ -288,6 +298,33 @@ fn sparkline(ui: &mut egui::Ui, history: &[f32], accent: egui::Color32, scale: f
         points,
         egui::Stroke::new((1.5 * scale).max(1.0), accent),
     ));
+}
+
+/// The primary monitor's work area `[x, y, w, h]` in points, with the taskbar
+/// excluded, so a bottom/right anchor clears it. `None` if the query fails.
+fn work_area() -> Option<[f32; 4]> {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SystemParametersInfoW, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    };
+    let mut rect = RECT::default();
+    // SAFETY: SPI_GETWORKAREA writes a RECT into the pointer we pass; `rect` is
+    // a valid, writable RECT for the duration of the call.
+    unsafe {
+        SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            Some(&mut rect as *mut RECT as *mut core::ffi::c_void),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    }
+    .ok()?;
+    Some([
+        rect.left as f32,
+        rect.top as f32,
+        (rect.right - rect.left) as f32,
+        (rect.bottom - rect.top) as f32,
+    ])
 }
 
 fn to_color(c: Rgb) -> egui::Color32 {

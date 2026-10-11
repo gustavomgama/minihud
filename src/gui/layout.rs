@@ -29,21 +29,24 @@ pub fn content_size(density: Density, scale: f32) -> [f32; 2] {
     ]
 }
 
-/// The top-left position of a `window`-sized panel anchored in a corner of a
-/// `monitor`-sized screen, inset by `margin`. Never returns a position that
-/// puts the panel off the top-left edge.
-pub fn anchor_pos(anchor: Anchor, monitor: [f32; 2], window: [f32; 2], margin: f32) -> [f32; 2] {
-    let right = monitor[0] - window[0] - margin;
-    let bottom = monitor[1] - window[1] - margin;
+/// The top-left position of a `window`-sized panel anchored in a corner of the
+/// monitor work area `work` (`[x, y, w, h]`, virtual-desktop points), inset by
+/// `margin`. Never returns a position off the top-left edge of the area.
+pub fn anchor_pos(anchor: Anchor, work: [f32; 4], window: [f32; 2], margin: f32) -> [f32; 2] {
+    let (x0, y0, w, h) = (work[0], work[1], work[2], work[3]);
+    let left = x0 + margin;
+    let top = y0 + margin;
+    let right = x0 + w - window[0] - margin;
+    let bottom = y0 + h - window[1] - margin;
     let x = match anchor {
-        Anchor::TopLeft | Anchor::BottomLeft => margin,
+        Anchor::TopLeft | Anchor::BottomLeft => left,
         Anchor::TopRight | Anchor::BottomRight => right,
     };
     let y = match anchor {
-        Anchor::TopLeft | Anchor::TopRight => margin,
+        Anchor::TopLeft | Anchor::TopRight => top,
         Anchor::BottomLeft | Anchor::BottomRight => bottom,
     };
-    [x.max(margin), y.max(margin)]
+    [x.max(left), y.max(top)]
 }
 
 #[cfg(test)]
@@ -54,19 +57,47 @@ mod tests {
     fn anchor_places_the_panel_in_each_corner() {
         // Catches: an anchor mapped to the wrong corner (a "bottom-right"
         // setting landing top-left), so the config silently does nothing.
-        let m = [1920.0, 1080.0];
+        let work = [0.0, 0.0, 1920.0, 1080.0];
         let w = [260.0, 174.0];
-        assert_eq!(anchor_pos(Anchor::TopLeft, m, w, 16.0), [16.0, 16.0]);
-        assert_eq!(anchor_pos(Anchor::TopRight, m, w, 16.0), [1644.0, 16.0]);
-        assert_eq!(anchor_pos(Anchor::BottomLeft, m, w, 16.0), [16.0, 890.0]);
-        assert_eq!(anchor_pos(Anchor::BottomRight, m, w, 16.0), [1644.0, 890.0]);
+        assert_eq!(anchor_pos(Anchor::TopLeft, work, w, 16.0), [16.0, 16.0]);
+        assert_eq!(anchor_pos(Anchor::TopRight, work, w, 16.0), [1644.0, 16.0]);
+        assert_eq!(anchor_pos(Anchor::BottomLeft, work, w, 16.0), [16.0, 890.0]);
+        assert_eq!(
+            anchor_pos(Anchor::BottomRight, work, w, 16.0),
+            [1644.0, 890.0]
+        );
+    }
+
+    #[test]
+    fn anchor_respects_the_work_area_origin() {
+        // Catches: a secondary monitor (origin != 0,0) anchoring the panel at
+        // the primary's corner, or a taskbar-inset work area ignored (the panel
+        // landing under the taskbar).
+        let secondary = [1920.0, 0.0, 1920.0, 1080.0];
+        assert_eq!(
+            anchor_pos(Anchor::TopLeft, secondary, [260.0, 174.0], 16.0),
+            [1936.0, 16.0],
+            "a secondary monitor offsets the panel by its origin"
+        );
+        // A 40px taskbar shortens the work area: bottom-right sits above it.
+        let with_taskbar = [0.0, 0.0, 1920.0, 1040.0];
+        assert_eq!(
+            anchor_pos(Anchor::BottomRight, with_taskbar, [260.0, 174.0], 16.0),
+            [1644.0, 850.0],
+            "the panel must clear the taskbar"
+        );
     }
 
     #[test]
     fn anchor_keeps_the_panel_on_screen_when_larger_than_the_monitor() {
         // Catches: a right/bottom anchor pushing an oversized panel into
         // negative coordinates (off the top-left edge, unreachable).
-        let p = anchor_pos(Anchor::BottomRight, [200.0, 200.0], [400.0, 400.0], 16.0);
+        let p = anchor_pos(
+            Anchor::BottomRight,
+            [0.0, 0.0, 200.0, 200.0],
+            [400.0, 400.0],
+            16.0,
+        );
         assert_eq!(p, [16.0, 16.0]);
     }
 

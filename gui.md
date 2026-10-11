@@ -68,6 +68,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 19. [x] Threshold tune: load amber at 70%, red at 85%; temps green<65, amber<80.
 20. [x] Signature accent rail on the panel's left edge.
 21. [x] Fix `tools/audit.ps1` CRAP exclude; full audit now PASSes.
+22. [x] Anchor in the monitor work area (clears the taskbar; honours the origin).
 
 ## Progress log
 
@@ -188,3 +189,9 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   and the workflow). Added the exclude; the full audit now **PASSes** end to
   end (fmt, clippy, nextest, machete, deny, audit, coverage, CRAP, jscpd,
   rustqual/mete advisory).
+- 2026-10-11: Work-area anchoring (item 22). A bottom/right anchor used the full
+  monitor height, so the panel could land under the taskbar. `anchor_pos` now
+  takes the work area `[x, y, w, h]` (origin-aware, so a secondary monitor
+  offsets correctly), and the app queries `SystemParametersInfoW(SPI_GETWORKAREA)`.
+  **Verified live**: work area `1920x1032` (48px taskbar), panel anchored at
+  `(1592, 828)` — clear of the taskbar. Gate green (188 tests, both features).
