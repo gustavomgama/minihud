@@ -8,6 +8,7 @@
 
 mod console;
 mod fps;
+mod gui;
 mod hook;
 mod hw;
 mod render;
