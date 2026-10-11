@@ -423,7 +423,7 @@ pub fn inject(pid: u32) -> Result<u32, String> {
     }
     // SAFETY: `OpenProcess` with a pid is a normal Win32 call.
     let process = unsafe { OpenProcess(PROCESS_ALL_ACCESS, false, pid) }
-        .map_err(|e| format!("OpenProcess({pid}): {e}"))?;
+        .map_err(|e| inject_error(&format!("OpenProcess({pid})"), &e))?;
     let process = ProcHandle(process);
 
     // SAFETY: `process.0` is a live process handle.
@@ -671,6 +671,38 @@ fn unload_recorder(
     Ok(())
 }
 
+/// A clearer message for a Win32 injection failure.
+///
+/// `E_ACCESSDENIED` from `OpenProcess`/`VirtualAllocEx`/`WriteProcessMemory`/
+/// `CreateRemoteThread` means the target is **protected** — an anti-cheat kernel
+/// driver, a protected-process-light, or a higher integrity level — not a
+/// minihud fault. Say so instead of a bare "failed".
+fn inject_error(what: &str, e: &windows::core::Error) -> String {
+    inject_error_hint(what, &e.to_string(), e.code().0 as u32)
+}
+
+/// As [`inject_error`] for a call that returns a raw pointer (e.g.
+/// `VirtualAllocEx`), where the failure is a Win32 error code from
+/// `GetLastError` rather than an `HRESULT`.
+fn inject_error_code(what: &str, code: u32) -> String {
+    inject_error_hint(what, &format!("Win32 error {code}"), code)
+}
+
+/// Format an injection failure, adding the protection hint for
+/// `ERROR_ACCESS_DENIED` (Win32 5 / `E_ACCESSDENIED` 0x80070005).
+fn inject_error_hint(what: &str, detail: &str, code: u32) -> String {
+    // ERROR_ACCESS_DENIED = 5; E_ACCESSDENIED = 0x80070005.
+    if code == 5 || code == 0x8007_0005 {
+        format!(
+            "{what}: {detail} — the target is protected (anti-cheat kernel driver) \
+             or at a higher integrity level; run minihud elevated, or the title \
+             blocks injection"
+        )
+    } else {
+        format!("{what}: {detail}")
+    }
+}
+
 /// Remote-load the recorder DLL into the target and return its base address.
 fn load_recorder(process: &ProcHandle, pid: u32, dll: &Path) -> Result<usize, String> {
     // Remote LoadLibraryW of the recorder DLL.
@@ -687,7 +719,9 @@ fn load_recorder(process: &ProcHandle, pid: u32, dll: &Path) -> Result<usize, St
         )
     };
     if remote_addr.is_null() {
-        return Err("VirtualAllocEx failed".into());
+        // SAFETY: `GetLastError` reads the calling thread's last error.
+        let code = unsafe { windows::Win32::Foundation::GetLastError() }.0;
+        return Err(inject_error_code("VirtualAllocEx", code));
     }
     // Owned from here on: every return below (including error paths) frees the
     // target's buffer instead of leaking it.
@@ -705,7 +739,7 @@ fn load_recorder(process: &ProcHandle, pid: u32, dll: &Path) -> Result<usize, St
             None,
         )
     }
-    .map_err(|e| format!("WriteProcessMemory: {e}"))?;
+    .map_err(|e| inject_error("WriteProcessMemory", &e))?;
 
     // SAFETY: kernel32 is loaded in every process.
     let kernel32 = unsafe { GetModuleHandleW(windows::core::w!("kernel32.dll")) }
@@ -741,7 +775,7 @@ pub fn unhook(pid: u32) -> Result<(), String> {
     let dll = staged_recorder(&hook_dll_path()?)?;
     // SAFETY: `OpenProcess` with a pid is a normal Win32 call.
     let process = unsafe { OpenProcess(PROCESS_ALL_ACCESS, false, pid) }
-        .map_err(|e| format!("OpenProcess({pid}): {e}"))?;
+        .map_err(|e| inject_error(&format!("OpenProcess({pid})"), &e))?;
     let process = ProcHandle(process);
 
     let want = dll.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -1403,6 +1437,24 @@ mod tests {
         assert_ne!(a, b, "different content must get different names");
         assert_eq!(a, staged_name(b"build one"), "same content -> same name");
         assert!(a.starts_with("hook_rt-") && a.ends_with(".dll"), "{a}");
+    }
+
+    #[test]
+    fn inject_error_explains_access_denied() {
+        // Catches: a bare "failed" for an E_ACCESSDENIED injection (a protected
+        // target, e.g. an anti-cheat kernel driver) — the operator needs to know
+        // it is protection, not a minihud bug.
+        let denied =
+            windows::core::Error::from_hresult(windows::core::HRESULT(0x8007_0005u32 as i32));
+        let msg = inject_error("VirtualAllocEx", &denied);
+        assert!(msg.contains("VirtualAllocEx"), "{msg}");
+        assert!(msg.contains("protected"), "{msg}");
+
+        let other =
+            windows::core::Error::from_hresult(windows::core::HRESULT(0x8000_4005u32 as i32));
+        let msg = inject_error("VirtualAllocEx", &other);
+        assert!(msg.contains("VirtualAllocEx"), "{msg}");
+        assert!(!msg.contains("protected"), "{msg}");
     }
 
     #[test]
