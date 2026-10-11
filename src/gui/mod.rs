@@ -5,4 +5,5 @@
 //! dead-code lint is silenced here — remove this once `--gui` lands.
 #![allow(dead_code)]
 
+pub mod config;
 pub mod model;

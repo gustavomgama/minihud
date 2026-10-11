@@ -39,7 +39,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 
 1. [x] Isolated `gui` branch + worktree.
 2. [x] `gui::model` — row model, thresholds, `--` for missing. (TDD)
-3. [ ] `gui::config` — TOML-backed, defaults = set-and-forget. (TDD)
+3. [x] `gui::config` — TOML-backed, defaults = set-and-forget. (TDD)
 4. [ ] `gui::app` — eframe overlay: transparent, always-on-top, click-through.
 5. [ ] Densities + accent theming.
 6. [ ] `--gui` wiring in `main.rs`; `cargo xtask` staging.
@@ -51,3 +51,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 - 2026-10-11: `gui::model` landed (TDD, 8 tests): CPU/CPU temp/RAM/GPU/GPU temp/VRAM/
   GPU power rows, `--` for missing, clamped bar fractions. Gate green (148 tests).
   `gui` module is `#![allow(dead_code)]` until `--gui` wiring lands (item 6).
+- 2026-10-11: `gui::config` landed (TDD, 6 tests): `minihud.toml` schema with
+  set-and-forget defaults, missing fields filled from defaults, out-of-range numbers
+  clamped (opacity 0.1..1, scale 0.5..3, poll 100..10000, margin ≤200), unknown
+  keys/values rejected. Added `toml` dep. Gate green (154 tests).
