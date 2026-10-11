@@ -42,6 +42,13 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   needs `gh auth login` (interactive, credentials). The branch is pushed; open
   the PR at:
   https://github.com/gustavomgama/minihud/compare/master...gui
+- **Real FPS number** — verified as far as the elevation boundary: with
+  `--gui --match steamwebhelper.exe` the target resolves, `PresentMon.exe`
+  spawns, and the log confirms it — but no frames arrive (`--`), because the
+  process is **not elevated** (`IsInRole(Administrator)` → False) and the ETW
+  `Dxgkrnl` session needs admin. A UAC prompt cannot be accepted headlessly, so
+  the live figure stays unverified here. It is exercised end-to-end up to that
+  boundary.
 
 ## Roadmap
 
@@ -218,3 +225,10 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   given order and skips unknowns. Example + README/CHANGELOG updated.
   **Verified live**: a GPU-only list renders. Gate green (194 tests, both
   features).
+- 2026-10-11: Chased the last gap — the live FPS figure. With
+  `--gui --match steamwebhelper.exe` (a capturable, D3D-presenting target) the
+  overlay resolves the target, logs `following steamwebhelper.exe (pid 1540)`,
+  and `PresentMon.exe` spawns — but no frames arrive. Root cause: the process is
+  **not elevated** (ETW `Dxgkrnl` needs admin), and UAC can't be accepted
+  headlessly. Pipeline verified end-to-end up to the elevation boundary; the
+  number itself stays unverified here. Recorded under Blocked.
