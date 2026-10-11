@@ -51,6 +51,7 @@ pub fn dist(features: Option<&str>) -> Result<(), String> {
         copy_asset(rel, &dist, *required)?;
     }
     copy_asset("README.md", &dist, true)?;
+    copy_asset("minihud.toml.example", &dist, false)?;
 
     let abs = fs::canonicalize(&dist).unwrap_or(dist);
     println!("shipping folder: {}", abs.display());

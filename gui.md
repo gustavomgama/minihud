@@ -35,6 +35,14 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   headless build stays lean and CI stays green.
 - Entry: `minihud --gui` (works beside `--stats-only` / default follow).
 
+## Blocked
+
+- **PR for `gui`** — `gh` is not authenticated on this machine
+  (`gh auth status` → "You are not logged into any GitHub hosts"). Opening the PR
+  needs `gh auth login` (interactive, credentials). The branch is pushed; open
+  the PR at:
+  https://github.com/gustavomgama/minihud/compare/master...gui
+
 ## Roadmap
 
 1. [x] Isolated `gui` branch + worktree.
@@ -106,3 +114,6 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   parsed); now parsed and passed to cargo for build/run/dist. Verified live:
   `cargo run -p xtask -- build --features gui` builds and stages. Gate green
   (175 tests).
+- 2026-10-11: `xtask dist` also ships `minihud.toml.example` so the config
+  surface is discoverable in the shipping folder. Gate green (175 tests). PR
+  blocked on `gh` auth (see Blocked).
