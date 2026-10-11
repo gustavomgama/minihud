@@ -6,8 +6,8 @@
 # Location: minihud reads `minihud.toml` next to the executable, then in the
 # working directory. The first one found wins.
 #
-# Build the overlay with:  cargo build --features gui
-# Then run:                minihud --gui
+# Build with:  cargo xtask build   (includes the overlay)
+# Then run:    minihud --gui
 
 # How much detail to show.
 #   "zen"      — FPS + one hero metric (GPU load)

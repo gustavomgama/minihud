@@ -91,6 +91,9 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         }
         i += 1;
     }
+    if features.is_none() {
+        features = Some("gui".to_string());
+    }
     Ok(Args {
         cmd: cmd.to_string(),
         release,
@@ -207,6 +210,15 @@ mod tests {
             parse_args(&a(&["build", "--nope"])).is_err(),
             "an unknown flag is an error"
         );
+    }
+
+    #[test]
+    fn parse_args_defaults_features_to_gui() {
+        // Catches: `cargo xtask build` producing a headless-only exe, so the
+        // documented `--gui` overlay is missing until the operator discovers
+        // the `--features gui` flag.
+        let p = parse_args(&a(&["build"])).unwrap();
+        assert_eq!(p.features.as_deref(), Some("gui"));
     }
 
     #[test]

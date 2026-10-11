@@ -6,7 +6,7 @@
 
 - **OSD overlay (`--gui`).** A transparent, always-on-top, click-through OSD
   showing FPS plus CPU / GPU / RAM, drawn with `egui`/`eframe`. Off by default;
-  build with `cargo build --features gui` (or `cargo xtask build --features gui`).
+  `cargo xtask build` includes it; plain `cargo build` needs `--features gui`.
 - **`minihud.toml`.** Fully optional config: density (`zen` / `standard` /
   `full`), corner `anchor`, `margin_px`, `opacity`, `scale`, `accent`, `poll_ms`,
   `fade_idle_secs`, `target`, `accent_color`, `metrics`. Missing file = sensible

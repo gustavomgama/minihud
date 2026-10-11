@@ -102,7 +102,7 @@ Without it the exe runs but every hardware value reads `--`.
 ## Build & run
 
 ```powershell
-cargo xtask build            # build + stage assets next to target/debug/minihud.exe
+cargo xtask build            # build + stage assets next to target/debug/minihud.exe (includes the --gui overlay)
 cargo xtask run              # build + stage, then run
 cargo xtask build --release
 cargo xtask dist             # assemble a shippable folder in dist/
@@ -146,7 +146,7 @@ the ETW session, the fps reads `--` and the run keeps going.
 ```text
 minihud                                    show the foreground target's fps + hardware stats (default)
 minihud --stats-only                       print hardware stats only (no fps)
-minihud --gui                              show the OSD overlay (build with --features gui)
+minihud --gui                              show the OSD overlay (included in cargo xtask build)
 minihud --follow [--match <glob>] [--follow-secs <n>]
 minihud -h | --help                        print help
 
@@ -191,7 +191,7 @@ animated values, so you can preview the overlay — and its themes — without a
 hardware or the LHM DLL.
 
 ```powershell
-cargo build --features gui        # or: cargo xtask build --features gui
+cargo xtask build            # includes the --gui overlay; or: cargo build --features gui
 target\debug\minihud.exe --gui
 target\debug\minihud.exe --gui --match deadlock*.exe   # follow a named target
 ```

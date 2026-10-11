@@ -81,6 +81,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 25. [x] Custom accent colour: `accent_color = "#rrggbb"` (`theme::parse_hex`).
 26. [x] Explicit metric list: `metrics = [...]` overrides `density` (`model::rows_named`).
 27. [x] Settled fade stops repainting at 20 fps (`motion::fade_animating`).
+28. [x] `cargo xtask build` includes the overlay by default (no `--features` flag).
 
 ## Progress log
 
@@ -238,3 +239,8 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   **not elevated** (ETW `Dxgkrnl` needs admin), and UAC can't be accepted
   headlessly. Pipeline verified end-to-end up to the elevation boundary; the
   number itself stays unverified here. Recorded under Blocked.
+- 2026-10-11: xtask builds the overlay by default (item 28). `parse_args` fills
+  `features` with `"gui"` when `--features` is absent (TDD), so `cargo xtask
+  build/run/dist` include `--gui` with no flags; an explicit `--features` still
+  wins. README/CHANGELOG/example updated. **Verified live**: `cargo run -p xtask
+  -- build` produced a gui-enabled exe. Gate green (196 tests, both features).
