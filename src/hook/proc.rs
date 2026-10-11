@@ -5,13 +5,12 @@
 //! panicking, so the follow loop simply sees "no target" and keeps polling.
 
 use windows::core::PWSTR;
-use windows::Win32::Foundation::{CloseHandle, HANDLE, STILL_ACTIVE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::Threading::{
-    GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
@@ -61,23 +60,6 @@ pub fn process_name(pid: u32) -> Option<String> {
     }
     .ok()?;
     Some(String::from_utf16_lossy(&buf[..len as usize]))
-}
-
-/// True when `pid` is still running. Fail-open: a process we cannot open is
-/// reported as not running, so a capture loop ends rather than spinning.
-pub fn process_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    // SAFETY: opening with a pid and limited query rights.
-    let Ok(handle) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }) else {
-        return false;
-    };
-    let handle = ProcHandle(handle);
-    let mut code: u32 = 0;
-    // SAFETY: `handle` is live and `code` a valid out-pointer.
-    let ok = unsafe { GetExitCodeProcess(handle.0, &mut code) };
-    ok.is_ok() && code == STILL_ACTIVE.0 as u32
 }
 
 /// Every process as `(pid, exe name)` from a `TH32CS_SNAPPROCESS` snapshot.
@@ -203,21 +185,9 @@ mod tests {
     }
 
     #[test]
-    fn process_alive_reports_our_own_pid_and_not_an_impossible_one() {
-        // Catches: a liveness check stuck at true (capture loop never ends) or
-        // false (capture loop ends immediately).
-        assert!(process_alive(std::process::id()), "our own pid is alive");
-        assert!(!process_alive(0), "pid 0 is never a live user process");
-        assert!(
-            !process_alive(0xFFFF_FFFE),
-            "a pid that cannot exist must read as dead"
-        );
-    }
-
-    #[test]
     fn name_matches_is_case_insensitive_and_optional_exe() {
         // Catches: a name match that requires the exact `.exe` spelling, so
-        // `--capture-hook overwatch` never resolves.
+        // `--fps-pid overwatch` never resolves.
         assert!(name_matches("Overwatch.exe", "overwatch"));
         assert!(name_matches("Overwatch.exe", "Overwatch.EXE"));
         assert!(name_matches("Overwatch", "overwatch.exe"));

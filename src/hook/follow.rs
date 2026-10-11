@@ -1,18 +1,20 @@
-//! Follow mode: watch for a target process and manage the present-hook
-//! injection lifecycle (detect → inject → retarget → unhook).
+//! Follow-mode target selection.
 //!
-//! This module is deliberately **hooking-only**. It never reads the shared
-//! frame ring and never computes fps/frametime — the consequences of hooking
-//! are out of scope here. The loop logs lifecycle events only.
+//! The default and `--follow` modes are now ETW-based (no injection) — the live
+//! watch loop lives in `crate::fps::follow`. This module holds the pure
+//! target-selection and CLI parsing that the ETW loop and the entry point share:
+//! the `--match` glob, foreground selection, the skip rules, `--follow`
+//! parsing, and the poll/deadline helpers.
 //!
-//! Target selection ([`matches`], [`select_target`], [`skip_reason`],
-//! [`parse_follow`]) is pure and unit-tested; the watch loop ([`run`]) is I/O
-//! and is exercised by running it against a real target.
+//! Everything here is pure and unit-tested; process enumeration and the watch
+//! loop are I/O and live in [`crate::hook::proc`] and [`crate::fps::follow`].
 
 use std::time::Duration;
 
-/// Default poll interval for `--follow` (ms).
-pub const DEFAULT_POLL_MS: u64 = 400;
+/// Default poll interval for `--follow` (ms). Matches the default hardware
+/// `--interval-ms` cadence, so the target is re-resolved at the same 500 ms
+/// rhythm as the rest of the status line.
+pub const DEFAULT_POLL_MS: u64 = 500;
 
 /// Parsed `--follow [--match <glob>] [--poll-ms <n>] [--follow-secs <n>]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,8 +82,8 @@ fn basename(path: &str) -> &str {
 /// case-insensitively, with `*` (any run) and `?` (one char) wildcards.
 ///
 /// A `.exe` on the process name is optional in the pattern, so `--match
-/// overwatch` matches `Overwatch.exe` — consistent with the `--capture-hook`
-/// target resolver.
+/// overwatch` matches `Overwatch.exe`, consistent with `--fps-pid`'s target
+/// resolver.
 pub fn matches(exe_basename: &str, glob: &str) -> bool {
     let name = basename(exe_basename).to_ascii_lowercase();
     let pattern = glob.to_ascii_lowercase();
@@ -162,7 +164,7 @@ const SKIP_EXES: &[&str] = &[
     "taskhostw.exe",
 ];
 
-/// Why a process must never be injected. `None` means "safe to consider".
+/// Why a process must never be targeted. `None` means "safe to consider".
 pub fn skip_reason(pid: u32, exe_basename: &str, own_pid: u32) -> Option<String> {
     if pid == 0 || pid == 4 {
         return Some("system pid".to_string());
@@ -177,145 +179,9 @@ pub fn skip_reason(pid: u32, exe_basename: &str, own_pid: u32) -> Option<String>
     None
 }
 
-/// One step of the follow loop's decision, given the desired target and the
-/// currently hooked one.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Step {
-    /// Nothing to do this tick.
-    Idle,
-    /// The hooked target is no longer selected: unhook it.
-    UnhookGone,
-    /// No target is hooked and one is selected: inject it.
-    Inject(u32, String),
-    /// A different target is selected: unhook the old one and inject the new.
-    Retarget(u32, String),
-}
-
-/// Decide the loop's next step from the desired target and the current one.
-///
-/// The same pid is a no-op (not a re-inject); a *different* selected pid is a
-/// retarget; a dropped selection with something still hooked is an unhook.
-fn next_action(desired: Option<(u32, String)>, current: Option<(u32, String)>) -> Step {
-    match (desired, current) {
-        (None, None) => Step::Idle,
-        (None, Some(_)) => Step::UnhookGone,
-        (Some((pid, exe)), None) => Step::Inject(pid, exe),
-        (Some((pid, exe)), Some((cur, _))) if pid != cur => Step::Retarget(pid, exe),
-        _ => Step::Idle,
-    }
-}
-
-/// The currently hooked target.
-struct Hooked {
-    pid: u32,
-    exe: String,
-    /// True when *we* injected the recorder; false when it was already loaded and
-    /// we are only observing it. A recorder we did not install is left alone.
-    fresh: bool,
-}
-
-/// Owns the currently hooked target and unhooks it on drop, so no exit path
-/// (Ctrl+C, early return, process exit) leaves a stale in-process patch.
-struct FollowGuard {
-    current: Option<Hooked>,
-}
-
-/// Release a hooked target and produce the lifecycle log line.
-///
-/// A target that has already exited took its in-process patches with it, so the
-/// remote `mh_uninstall` is pointless — and fails, because the pid is gone. In
-/// that case the remote call is skipped and the release is still reported as
-/// `unhooked` (the target exited); otherwise the remote unhook's outcome is
-/// reported.
-fn release_target(
-    exe: &str,
-    pid: u32,
-    process_alive: bool,
-    remote_unhook: impl FnOnce() -> Result<(), String>,
-) -> String {
-    if !process_alive {
-        return format!("unhooked {exe} (pid {pid}) (process already exited)");
-    }
-    match remote_unhook() {
-        Ok(()) => format!("unhooked {exe} (pid {pid})"),
-        Err(e) => format!("unhook skipped for {exe} (pid {pid}): {e}"),
-    }
-}
-
-impl FollowGuard {
-    /// Unhook the current target, returning the lifecycle log line, if any.
-    fn unhook_current(&mut self) -> Option<String> {
-        let h = self.current.take()?;
-        if !h.fresh {
-            // A recorder we did not install (a pre-existing injection) is left
-            // alone — unhooking it would break another session's capture.
-            return Some(format!(
-                "left recorder in {} (pid {}) (not ours to unhook)",
-                h.exe, h.pid
-            ));
-        }
-        Some(release_target(
-            &h.exe,
-            h.pid,
-            super::proc::process_alive(h.pid),
-            || super::unhook(h.pid),
-        ))
-    }
-}
-
-impl Drop for FollowGuard {
-    fn drop(&mut self) {
-        // Backstop only; never panic from Drop. The main path logs the outcome.
-        let _ = self.unhook_current();
-    }
-}
-
-/// Lifecycle log line (routed to the console by the tracing writer).
-fn log(msg: &str) {
-    tracing::info!("follow: {msg}");
-}
-
-/// Print `msg` only when it differs from the previous status (avoids logging
-/// the same "skipped"/"idle" line twice a second forever).
-fn log_once(last: &mut Option<String>, msg: String) {
-    if last.as_deref() != Some(msg.as_str()) {
-        log(&msg);
-        *last = Some(msg);
-    }
-}
-
-/// Inject into `pid` and, on success, record it as the hooked target.
-fn try_inject(
-    guard: &mut FollowGuard,
-    last_status: &mut Option<String>,
-    refused: &mut Option<u32>,
-    pid: u32,
-    exe: String,
-) {
-    log_once(last_status, format!("target={exe} (pid {pid}); injecting"));
-    let fresh = super::find_loaded_recorder(pid).is_none();
-    match super::inject(pid) {
-        Ok(mask) => {
-            log_once(
-                last_status,
-                format!(
-                    "injected into {exe} (pid {pid}) — installed hooks {} (mask {mask:#x})",
-                    super::describe_installed(mask)
-                ),
-            );
-            guard.current = Some(Hooked { pid, exe, fresh });
-            *refused = None;
-        }
-        Err(e) => {
-            log_once(last_status, format!("skipped {exe} (pid {pid}): {e}"));
-            *refused = Some(pid);
-        }
-    }
-}
-
 /// The sleep between follow ticks. `--poll-ms 0` is clamped to 1 ms so the loop
 /// cannot busy-spin; a huge value is kept (the loop simply waits).
-fn poll_delay(poll_ms: u64) -> Duration {
+pub(crate) fn poll_delay(poll_ms: u64) -> Duration {
     Duration::from_millis(poll_ms.max(1))
 }
 
@@ -326,127 +192,11 @@ fn poll_delay(poll_ms: u64) -> Duration {
 /// duration to instant" for an astronomically large bound, so a value that does
 /// not fit is treated as no practical bound (run until Ctrl+C) rather than
 /// crashing the host.
-fn follow_deadline(now: std::time::Instant, secs: Option<u64>) -> Option<std::time::Instant> {
+pub(crate) fn follow_deadline(
+    now: std::time::Instant,
+    secs: Option<u64>,
+) -> Option<std::time::Instant> {
     secs.and_then(|s| now.checked_add(Duration::from_secs(s)))
-}
-
-/// Watch for a target and manage the present-hook injection lifecycle.
-///
-/// Stops on Ctrl+C, or after `secs` seconds when that is `Some` (a bounded
-/// follow, which a non-interactive caller can drive to completion). Each
-/// `poll_ms` tick it resolves the current target (foreground + optional glob),
-/// then injects it if it changed and unhooks the previous one. It logs lifecycle
-/// events and shows the hooked target's fps/frametime on the status line
-/// (read-only) beside the hardware stats.
-pub fn run(match_glob: Option<String>, poll_ms: u64, secs: Option<u64>) -> Result<(), String> {
-    let poll = poll_delay(poll_ms);
-    let own = std::process::id();
-    super::install_ctrl_handler();
-
-    let glob_desc = match_glob.as_deref().unwrap_or("<foreground>");
-    let bound = secs.map(|s| format!(", secs={s}")).unwrap_or_default();
-    log(&format!(
-        "started (match={glob_desc}, poll={}ms, own pid={own}{bound})",
-        poll.as_millis()
-    ));
-
-    let deadline = follow_deadline(std::time::Instant::now(), secs);
-
-    let mut guard = FollowGuard { current: None };
-    let mut last_status: Option<String> = None;
-    let mut refused: Option<u32> = None;
-    // Fps/frametime display for the currently-hooked target (updated each tick).
-    let mut fps_reader: Option<super::FrameReader> = None;
-    let mut fps_pid: u32 = 0;
-    let mut last_seq: Option<u64> = None;
-
-    while super::should_run() && deadline.is_none_or(|d| std::time::Instant::now() < d) {
-        let foreground = super::proc::foreground_pid()
-            .and_then(|pid| super::proc::process_name(pid).map(|name| (pid, name)));
-        let processes = super::proc::list_processes();
-        let chosen = select_target(match_glob.as_deref(), foreground, &processes);
-
-        let desired = match chosen {
-            None => None,
-            Some((pid, exe)) => {
-                if let Some(reason) = skip_reason(pid, &exe, own) {
-                    log_once(
-                        &mut last_status,
-                        format!("skipped {exe} (pid {pid}): {reason}"),
-                    );
-                    None
-                } else if refused == Some(pid) {
-                    None
-                } else {
-                    Some((pid, exe))
-                }
-            }
-        };
-
-        let current = guard.current.as_ref().map(|h| (h.pid, h.exe.clone()));
-        match next_action(desired, current.clone()) {
-            Step::Idle => {}
-            Step::UnhookGone => {
-                if let Some((pid, exe)) = current {
-                    log_once(&mut last_status, format!("target={exe} (pid {pid}) gone"));
-                }
-                if let Some(msg) = guard.unhook_current() {
-                    log(&msg);
-                }
-                last_status = None;
-                refused = None;
-            }
-            Step::Inject(pid, exe) => {
-                try_inject(&mut guard, &mut last_status, &mut refused, pid, exe);
-            }
-            Step::Retarget(pid, exe) => {
-                log_once(
-                    &mut last_status,
-                    format!("target changed to {exe} (pid {pid})"),
-                );
-                if let Some(msg) = guard.unhook_current() {
-                    log(&msg);
-                }
-                try_inject(&mut guard, &mut last_status, &mut refused, pid, exe);
-            }
-        }
-
-        // Keep the status line's fps segment current for the hooked target, so
-        // the default `minihud` run shows fps/frametime beside the hardware
-        // stats. (This is the one place follow touches the ring — read-only.)
-        match guard.current.as_ref() {
-            Some(h) => {
-                if fps_pid != h.pid {
-                    fps_reader = super::FrameReader::open(h.pid).ok();
-                    fps_pid = h.pid;
-                    last_seq = None;
-                }
-                if let Some(r) = &fps_reader {
-                    super::print_sample(h.pid, r, &mut last_seq);
-                }
-            }
-            None => {
-                if fps_reader.is_some() {
-                    fps_reader = None;
-                    fps_pid = 0;
-                    crate::console::status_capture("");
-                }
-            }
-        }
-
-        std::thread::sleep(poll);
-    }
-
-    let reason = if super::should_run() {
-        "follow-secs elapsed"
-    } else {
-        "interrupt"
-    };
-    log(&format!("stopping ({reason})"));
-    if let Some(msg) = guard.unhook_current() {
-        log(&msg);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -459,10 +209,16 @@ mod tests {
 
     #[test]
     fn follow_default_follows_the_foreground_on_the_default_cadence() {
-        // Catches: a `Default` that polls at 0 ms (busy-spin) or picks a name
-        // filter, when `--follow` is the default mode with no arguments.
+        // Catches: a `Default` that polls at 0 ms (busy-spin), picks a name
+        // filter when `--follow` is the default mode with no arguments, or lets
+        // the default cadence drift off the 500 ms `--interval-ms` value.
         let d = FollowArgs::default();
         assert_eq!(d.match_glob, None);
+        assert_eq!(
+            d.poll_ms, 500,
+            "the default follow cadence must be 500 ms, was {}",
+            d.poll_ms
+        );
         assert_eq!(d.poll_ms, DEFAULT_POLL_MS);
         assert_eq!(d.secs, None);
     }
@@ -484,7 +240,7 @@ mod tests {
             parse_follow(&args(&["--poll-ms", "100"])).map(|f| f.poll_ms),
             Some(100)
         );
-        assert_eq!(parse_follow(&args(&["--capture-hook", "1"])), None);
+        assert_eq!(parse_follow(&args(&["--stats-only"])), None);
         assert_eq!(parse_follow(&args(&[])), None);
     }
 
@@ -498,7 +254,7 @@ mod tests {
     #[test]
     fn glob_tolerates_a_missing_exe_on_the_process_name() {
         // Catches: `--match overwatch` never matching `Overwatch.exe` (the follow
-        // would silently never inject) while a genuinely different name still
+        // would silently never target it) while a genuinely different name still
         // fails.
         assert!(matches("Overwatch.exe", "overwatch"));
         assert!(matches("Overwatch.exe", "OVERWATCH"));
@@ -620,7 +376,7 @@ mod tests {
 
     #[test]
     fn parse_follow_is_none_without_the_flag() {
-        assert_eq!(parse_follow(&args(&["--capture-hook", "1"])), None);
+        assert_eq!(parse_follow(&args(&["--stats-only"])), None);
     }
 
     #[test]
@@ -687,35 +443,6 @@ mod tests {
             Some("b.exe"),
             "the last --match wins and unknown tokens are ignored"
         );
-    }
-
-    #[test]
-    fn release_of_an_exited_target_skips_the_remote_unhook() {
-        // Catches: remote-calling `mh_uninstall` in a pid that already exited
-        // (the observed `unhook skipped ... OpenProcess: invalid parameter`) and
-        // reporting the lifecycle as a failure instead of "unhooked".
-        let mut called = false;
-        let line = release_target("game.exe", 7, false, || -> Result<(), String> {
-            called = true;
-            Ok(())
-        });
-        assert!(
-            !called,
-            "a target that already exited must not be remote-unhooked"
-        );
-        assert!(line.contains("unhooked game.exe (pid 7)"), "{line}");
-        assert!(line.contains("exited"), "{line}");
-    }
-
-    #[test]
-    fn release_of_a_live_target_reports_the_remote_outcome() {
-        assert_eq!(
-            release_target("game.exe", 7, true, || Ok(())),
-            "unhooked game.exe (pid 7)"
-        );
-        let failed = release_target("game.exe", 7, true, || Err("boom".to_string()));
-        assert!(failed.contains("unhook skipped"), "{failed}");
-        assert!(failed.contains("boom"), "{failed}");
     }
 
     #[test]
@@ -807,29 +534,6 @@ mod tests {
             follow_deadline(now, Some(u64::MAX)),
             None,
             "an overflowing bound must not panic and is treated as unbounded"
-        );
-    }
-
-    #[test]
-    fn next_action_selects_inject_retarget_and_unhook() {
-        // Catches: a follow loop that re-injects the same pid every tick, never
-        // retargets when the pid changes, or leaves a stale hook when the
-        // target is gone.
-        let a = || (1u32, "a.exe".to_string());
-        assert_eq!(next_action(None, None), Step::Idle);
-        assert_eq!(next_action(None, Some(a())), Step::UnhookGone);
-        assert_eq!(
-            next_action(Some(a()), None),
-            Step::Inject(1, "a.exe".into())
-        );
-        assert_eq!(
-            next_action(Some((2, "b.exe".to_string())), Some(a())),
-            Step::Retarget(2, "b.exe".into())
-        );
-        assert_eq!(
-            next_action(Some(a()), Some(a())),
-            Step::Idle,
-            "the already-hooked pid is a no-op, not a re-inject"
         );
     }
 }

@@ -1,8 +1,8 @@
 //! Recursive `clean` for the xtask build helper.
 //!
 //! On Windows `cargo clean` cannot delete files a running process holds open —
-//! the currently running `xtask.exe`, and any target that still has the recorder
-//! DLL loaded. `clean` removes what it can and **reports** the rest instead of
+//! the currently running `xtask.exe`, and any running target that holds a
+//! staged asset. `clean` removes what it can and **reports** the rest instead of
 //! failing, so a locked file never blocks a build.
 
 use std::fs;
@@ -15,7 +15,7 @@ pub fn clean() -> Result<(), String> {
     let me = std::env::current_exe().ok();
 
     // Primary path: `cargo clean`. A failure here is expected on Windows when
-    // the running xtask (or a hooked target) holds a file — finish by hand.
+    // the running xtask (or a running minihud) holds a file — finish by hand.
     let out = cargo()
         .current_dir(root())
         .arg("clean")
@@ -39,7 +39,7 @@ pub fn clean() -> Result<(), String> {
 /// The message `clean` prints after the hand-removal pass: a success note, plus
 /// any files it could not delete because a process holds them.
 ///
-/// A locked file (e.g. the recorder DLL a still-running target loaded) is
+/// A locked file (e.g. a staged asset a still-running minihud loaded) is
 /// **reported, not fatal** — `clean` must never fail a build. The running
 /// `xtask` image is expected and not listed.
 fn clean_report(skipped: &[PathBuf], self_exe: Option<&Path>) -> String {
@@ -58,7 +58,7 @@ fn clean_report(skipped: &[PathBuf], self_exe: Option<&Path>) -> String {
         .join(", ");
     format!(
         "cleaned target/ and dist/; {} file(s) are in use by a running process and were left \
-         (close the hooked app to remove them): {list}",
+         (close the running app to remove them): {list}",
         others.len()
     )
 }
@@ -167,11 +167,11 @@ mod tests {
 
     #[test]
     fn clean_report_is_never_fatal_and_lists_locked_files() {
-        // Catches: `clean` failing (or silently hiding) a file a running target
-        // holds. A locked recorder DLL is expected on Windows; it must be
-        // reported, not turned into an error that blocks the build.
+        // Catches: `clean` failing (or silently hiding) a file a running
+        // process holds. A locked staged asset is expected on Windows; it must
+        // be reported, not turned into an error that blocks the build.
         let base = temp_dir("report");
-        let locked = base.join("hook_rt.dll");
+        let locked = base.join("PresentMon.exe");
         fs::write(&locked, b"locked by a target").unwrap();
 
         let none = clean_report(&[], None);
@@ -179,7 +179,7 @@ mod tests {
 
         let one = clean_report(std::slice::from_ref(&locked), None);
         assert!(one.contains("in use"), "{one}");
-        assert!(one.contains("hook_rt.dll"), "{one}");
+        assert!(one.contains("PresentMon.exe"), "{one}");
 
         let _ = fs::remove_dir_all(&base);
     }

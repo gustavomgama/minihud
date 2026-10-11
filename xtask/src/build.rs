@@ -1,18 +1,14 @@
 //! Build / stage / dist for the xtask helper.
 //!
-//! Builds the `minihud` exe and its injected `hook_rt.dll` runtime into the
-//! canonical `target/<profile>/`, stages the LibreHardwareMonitor bridge assets
-//! and that runtime next to the exe, and assembles the shipping folder in
-//! `dist/`.
+//! Builds the `minihud` exe into the canonical `target/<profile>/`, stages the
+//! LibreHardwareMonitor bridge assets and the tier-0 `PresentMon.exe` sidecar
+//! next to the exe, and assembles the shipping folder in `dist/`.
 
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{
-    cargo, is_lock_err, read_dir, root, same_file, target_dir, ASSETS, EXE, HOOK_RT_DLL,
-    HOOK_RT_PKG, HOOK_VK_LAYER_DLL, HOOK_VK_LAYER_PKG, PKG,
-};
+use crate::{cargo, is_lock_err, read_dir, root, target_dir, ASSETS, EXE, PKG};
 
 /// `cargo xtask build`: build, stage, and print the exe path.
 pub fn build_and_stage(release: bool) -> Result<(), String> {
@@ -50,8 +46,6 @@ pub fn dist() -> Result<(), String> {
     for (rel, required) in ASSETS {
         copy_asset(rel, &dist, *required)?;
     }
-    stage_hook_rt(&profile_dir(true), &dist)?;
-    stage_hook_vk_layer(&profile_dir(true), &dist)?;
     copy_asset("README.md", &dist, true)?;
 
     let abs = fs::canonicalize(&dist).unwrap_or(dist);
@@ -84,12 +78,9 @@ fn exe_path(release: bool) -> Result<PathBuf, String> {
     }
 }
 
-/// The packages `build` compiles in one invocation: the product exe and its
-/// injected runtime plus the Vulkan implicit layer. The validation-only
-/// `hook-test` tool is deliberately not here; build it on demand with
-/// `cargo build -p hook-test`.
+/// The packages `build` compiles in one invocation: just the product exe.
 fn build_packages() -> &'static [&'static str] {
-    &[PKG, HOOK_RT_PKG, HOOK_VK_LAYER_PKG]
+    &[PKG]
 }
 
 fn build(release: bool) -> Result<(), String> {
@@ -128,47 +119,7 @@ fn stage(release: bool) -> Result<(), String> {
     for (rel, required) in ASSETS {
         copy_asset(rel, &dir, *required)?;
     }
-    stage_hook_rt(&dir, &dir)?;
-    stage_hook_vk_layer(&dir, &dir)?;
     Ok(())
-}
-
-/// Copy the injected runtime from `from_dir` next to the product in `to_dir`.
-/// `build` already compiles it into the profile dir, so this is a no-op there
-/// and only does real work for `dist`. Missing is a warning, not an error (the
-/// default LHM path does not need it).
-fn stage_hook_rt(from_dir: &Path, to_dir: &Path) -> Result<(), String> {
-    let src = from_dir.join(HOOK_RT_DLL);
-    let dst = to_dir.join(HOOK_RT_DLL);
-    if !src.exists() {
-        eprintln!(
-            "xtask: note: {HOOK_RT_DLL} not present; --capture-hook unavailable until it is built"
-        );
-        return Ok(());
-    }
-    if same_file(&src, &dst) {
-        return Ok(());
-    }
-    copy_file(&src, &dst)
-}
-
-/// Copy the Vulkan implicit layer DLL from `from_dir` next to the product in
-/// `to_dir`. `build` compiles it into the profile dir, so this is a no-op there
-/// and only does real work for `dist`. Missing is a warning (the layer needs
-/// registration to be active; see HOOKING.md).
-fn stage_hook_vk_layer(from_dir: &Path, to_dir: &Path) -> Result<(), String> {
-    let src = from_dir.join(HOOK_VK_LAYER_DLL);
-    let dst = to_dir.join(HOOK_VK_LAYER_DLL);
-    if !src.exists() {
-        eprintln!(
-            "xtask: note: {HOOK_VK_LAYER_DLL} not present; the Vulkan layer is unavailable until it is built"
-        );
-        return Ok(());
-    }
-    if same_file(&src, &dst) {
-        return Ok(());
-    }
-    copy_file(&src, &dst)
 }
 
 /// Copy `<root>/<rel>` into `dst_dir` under its file name. `required=false`
@@ -254,69 +205,11 @@ mod tests {
     }
 
     #[test]
-    fn build_packages_are_the_product_and_runtime_but_not_hook_test() {
+    fn build_packages_include_the_product() {
+        // Catches: `build` no longer compiling the product exe, so
+        // `cargo xtask build` would not produce the artifact it stages.
         let pkgs = build_packages();
         assert!(pkgs.contains(&PKG), "product exe package missing: {pkgs:?}");
-        assert!(
-            pkgs.contains(&HOOK_RT_PKG),
-            "injected runtime package missing: {pkgs:?}"
-        );
-        assert!(
-            pkgs.contains(&HOOK_VK_LAYER_PKG),
-            "Vulkan implicit layer package missing: {pkgs:?}"
-        );
-        assert!(
-            !pkgs.contains(&"hook-test"),
-            "hook-test is validation-only and must not be built by `build`: {pkgs:?}"
-        );
-    }
-
-    #[test]
-    fn stage_hook_vk_layer_copies_the_layer_next_to_the_product() {
-        let from = temp_dir("vk-from");
-        let to = temp_dir("vk-to");
-        fs::write(from.join(HOOK_VK_LAYER_DLL), b"layer-bytes").unwrap();
-        stage_hook_vk_layer(&from, &to).unwrap();
-        assert_eq!(
-            fs::read(to.join(HOOK_VK_LAYER_DLL)).unwrap(),
-            b"layer-bytes"
-        );
-        let _ = fs::remove_dir_all(&from);
-        let _ = fs::remove_dir_all(&to);
-    }
-
-    #[test]
-    fn stage_hook_rt_copies_the_runtime_next_to_the_product() {
-        let from = temp_dir("from");
-        let to = temp_dir("to");
-        fs::write(from.join(HOOK_RT_DLL), b"dll-bytes").unwrap();
-        stage_hook_rt(&from, &to).unwrap();
-        assert_eq!(fs::read(to.join(HOOK_RT_DLL)).unwrap(), b"dll-bytes");
-        let _ = fs::remove_dir_all(&from);
-        let _ = fs::remove_dir_all(&to);
-    }
-
-    #[test]
-    fn stage_hook_rt_warns_but_succeeds_when_runtime_is_missing() {
-        let from = temp_dir("from");
-        let to = temp_dir("to");
-        stage_hook_rt(&from, &to).unwrap();
-        assert!(!to.join(HOOK_RT_DLL).exists(), "must not fabricate the dll");
-        let _ = fs::remove_dir_all(&from);
-        let _ = fs::remove_dir_all(&to);
-    }
-
-    #[test]
-    fn stage_hook_rt_leaves_the_runtime_intact_when_source_is_the_destination() {
-        let dir = temp_dir("self");
-        fs::write(dir.join(HOOK_RT_DLL), b"dll-bytes").unwrap();
-        stage_hook_rt(&dir, &dir).unwrap();
-        assert_eq!(
-            fs::read(dir.join(HOOK_RT_DLL)).unwrap(),
-            b"dll-bytes",
-            "a self-copy must not truncate the runtime"
-        );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -348,56 +241,33 @@ mod tests {
     }
 
     #[test]
-    fn copy_asset_stages_the_layer_manifest_under_its_file_name() {
-        // Catches: staging the manifest at a path that does not match the layer
-        // DLL's relative `library_path`, so the layer loads its DLL from the
-        // wrong place (or not at all). The manifest is a real repo file here.
-        let to = temp_dir("manifest");
-        copy_asset(crate::HOOK_VK_LAYER_MANIFEST, &to, false).expect("the manifest is present");
-        let staged = to.join("hook_vk_layer.json");
-        assert!(staged.exists(), "manifest must land as hook_vk_layer.json");
+    fn copy_asset_stages_presentmon_under_its_file_name() {
+        // Catches: staging the tier-0 FPS collector at a path that does not
+        // match the name `src/fps/presentmon.rs` resolves, so a shipped build
+        // spawns no PresentMon and the fps row stays `--`. The binary is a real
+        // repo file (see README); this asserts it lands under `PresentMon.exe`.
+        let to = temp_dir("presentmon");
+        copy_asset(crate::PRESENTMON_REL, &to, false).expect("PresentMon.exe is present");
+        let staged = to.join("PresentMon.exe");
+        assert!(staged.exists(), "PresentMon must land as PresentMon.exe");
         assert_eq!(
             fs::read(&staged).unwrap(),
-            fs::read(root().join(crate::HOOK_VK_LAYER_MANIFEST)).unwrap(),
-            "the staged manifest must be byte-identical"
+            fs::read(root().join(crate::PRESENTMON_REL)).unwrap(),
+            "the staged PresentMon must be byte-identical"
         );
         let _ = fs::remove_dir_all(&to);
     }
 
     #[test]
-    fn stage_hook_rt_does_not_stage_a_stale_hook_test_beside_the_source() {
-        // Catches: a copy-the-whole-directory staging step that would ship the
-        // validation-only `hook-test.exe` (and its PDB) in `dist/`. Only the
-        // named runtime must be staged.
-        let from = temp_dir("stale-from");
-        let to = temp_dir("stale-to");
-        fs::write(from.join(HOOK_RT_DLL), b"dll-bytes").unwrap();
-        fs::write(from.join("hook-test.exe"), b"validation-only").unwrap();
-        stage_hook_rt(&from, &to).unwrap();
-        assert!(to.join(HOOK_RT_DLL).exists(), "the runtime must be staged");
-        assert!(
-            !to.join("hook-test.exe").exists(),
-            "a stale hook-test.exe must never be staged"
+    fn the_staging_list_contains_presentmon_as_optional() {
+        // Catches: PresentMon becoming a required asset (a missing binary would
+        // hard-fail every build) or dropping out of the staged assets entirely
+        // (the fps path would silently be dead in a shipped folder).
+        let entry = ASSETS.iter().find(|(rel, _)| *rel == crate::PRESENTMON_REL);
+        assert_eq!(
+            entry,
+            Some(&(crate::PRESENTMON_REL, false)),
+            "PresentMon must be staged as an optional asset: {ASSETS:?}"
         );
-        let _ = fs::remove_dir_all(&from);
-        let _ = fs::remove_dir_all(&to);
-    }
-
-    #[test]
-    fn the_staging_list_contains_the_layer_manifest_and_never_the_validation_target() {
-        // Catches: adding the validation-only `hook-test` to the staged assets,
-        // or dropping the layer manifest so the shipped layer cannot load.
-        assert!(
-            ASSETS
-                .iter()
-                .any(|(rel, _)| *rel == crate::HOOK_VK_LAYER_MANIFEST),
-            "the layer manifest must be staged next to the layer DLL: {ASSETS:?}"
-        );
-        for (rel, _) in ASSETS {
-            assert!(
-                !rel.contains("hook-test"),
-                "validation target leaked into the staged assets: {rel}"
-            );
-        }
     }
 }

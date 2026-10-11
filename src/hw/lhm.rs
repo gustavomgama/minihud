@@ -17,8 +17,11 @@ use std::time::{Duration, Instant};
 
 /// Seconds before retrying a failed bridge session.
 const BRIDGE_RETRY_SECS: u64 = 5;
-/// Milliseconds between bridge polls (one JSON dump per tick).
-const BRIDGE_POLL_MS: u64 = 500;
+/// Default milliseconds between bridge polls (one JSON dump per tick). The
+/// default of `1` reads continuously for the freshest possible values; the
+/// bridge's own `Update()` read costs ~92 ms, so the sensor rate is ~10/s
+/// regardless.
+pub const BRIDGE_POLL_MS: u64 = 1;
 
 /// One sensor reading from the bridge.
 #[derive(Clone, Debug, Deserialize)]
@@ -42,10 +45,13 @@ pub struct LhmFeed {
 }
 
 impl LhmFeed {
-    pub fn start() -> Self {
+    /// Start the bridge ticking every `poll_ms` (clamped to ≥1 ms). A faster
+    /// cadence lowers the latency from a sensor change to the status line; the
+    /// caller is responsible for not pegging the machine.
+    pub fn start_with_poll(poll_ms: u64) -> Self {
         let latest = Arc::new(Mutex::new(None));
         let slot = latest.clone();
-        std::thread::spawn(move || Self::run(slot));
+        std::thread::spawn(move || Self::run(slot, poll_ms));
         Self { latest }
     }
 
@@ -61,21 +67,21 @@ impl LhmFeed {
         }
     }
 
-    fn run(slot: LhmLatest) {
+    fn run(slot: LhmLatest, poll_ms: u64) {
         loop {
-            if let Err(e) = Self::session(&slot) {
+            if let Err(e) = Self::session(&slot, poll_ms) {
                 tracing::warn!("lhm bridge: {e}; retry in {BRIDGE_RETRY_SECS}s");
             }
             std::thread::sleep(Duration::from_secs(BRIDGE_RETRY_SECS));
         }
     }
 
-    fn session(slot: &LhmLatest) -> Result<(), String> {
+    fn session(slot: &LhmLatest, poll_ms: u64) -> Result<(), String> {
         let mut child = spawn_bridge()?;
         let (mut out, mut stdin) = bridge_streams(&mut child)?;
         read_handshake(&mut out)?;
         tracing::info!("lhm bridge: serving");
-        pump(&mut out, &mut stdin, slot)
+        pump(&mut out, &mut stdin, slot, poll_ms)
     }
 }
 
@@ -125,15 +131,26 @@ fn read_handshake(out: &mut impl BufRead) -> Result<(), String> {
 
 /// Tick the bridge: send a newline, read one JSON line, store it. Returns the
 /// bytes read so the caller can detect a closed stdout (0 = EOF).
-fn pump(out: &mut impl BufRead, stdin: &mut impl Write, slot: &LhmLatest) -> Result<(), String> {
+fn pump(
+    out: &mut impl BufRead,
+    stdin: &mut impl Write,
+    slot: &LhmLatest,
+    poll_ms: u64,
+) -> Result<(), String> {
     let mut line = String::new();
     loop {
         let n = tick(out, stdin, &mut line, slot)?;
         if n == 0 {
             return Err("bridge closed stdout".to_string());
         }
-        std::thread::sleep(Duration::from_millis(BRIDGE_POLL_MS));
+        std::thread::sleep(bridge_delay(poll_ms));
     }
+}
+
+/// The sleep between bridge ticks (ms clamped to ≥1 so a `--bridge-ms 0` cannot
+/// busy-spin the sidecar). Pure, so the clamp is unit-tested.
+pub(crate) fn bridge_delay(poll_ms: u64) -> Duration {
+    Duration::from_millis(poll_ms.max(1))
 }
 
 fn tick(
@@ -256,5 +273,14 @@ mod tests {
             feed.latest(Duration::from_secs(0)).is_none(),
             "a zero-age window means the sample is already stale"
         );
+    }
+
+    #[test]
+    fn bridge_delay_clamps_zero_and_keeps_a_normal_cadence() {
+        // Catches: a `--bridge-ms 0` busy-spinning the PowerShell sidecar (and
+        // the LHM hardware reads) at full tilt, or a valid value being ignored.
+        assert_eq!(bridge_delay(0), Duration::from_millis(1));
+        assert_eq!(bridge_delay(100), Duration::from_millis(100));
+        assert_eq!(bridge_delay(500), Duration::from_millis(500));
     }
 }

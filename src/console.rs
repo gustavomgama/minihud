@@ -8,9 +8,11 @@
 //! the hardware line never repeats — it updates in place.
 
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// The two status segments plus the redraw bookkeeping.
+#[derive(Default)]
 struct Out {
     /// Hardware-stats segment (left).
     hw: String,
@@ -21,19 +23,50 @@ struct Out {
     prev_len: usize,
     /// Whether a status line is currently on screen.
     drawn: bool,
+    /// The exact text currently on screen. A `set()` whose composed line equals
+    /// this writes nothing — the redraw is skipped.
+    last: String,
+    /// Actual hardware-segment changes (for the `--stats` rate readout).
+    hw_updates: u64,
+    /// Actual capture-segment changes (for the `--stats` rate readout).
+    fps_updates: u64,
+    /// Capture-segment redraw attempts (the fps tick), so the `--stats` readout
+    /// can show the cadence even while the number is steady.
+    fps_ticks: u64,
 }
 
 static OUT: OnceLock<Mutex<Out>> = OnceLock::new();
 
 fn out() -> &'static Mutex<Out> {
-    OUT.get_or_init(|| {
-        Mutex::new(Out {
-            hw: String::new(),
-            capture: String::new(),
-            prev_len: 0,
-            drawn: false,
-        })
-    })
+    OUT.get_or_init(|| Mutex::new(Out::default()))
+}
+
+impl Out {
+    /// Compose the current line and return the bytes that redraw it in place, or
+    /// `None` when the composed line is identical to the one already on screen
+    /// (nothing to do). Pure bookkeeping, so the "redraw only on change" rule is
+    /// unit-tested without touching stdout.
+    fn render(&mut self, max: usize) -> Option<String> {
+        let line = compose(&self.hw, &self.capture, max);
+        if line == self.last {
+            return None;
+        }
+        let bytes = redraw_bytes(self.prev_len, &line);
+        self.prev_len = line.chars().count();
+        self.drawn = !line.is_empty();
+        self.last = line;
+        Some(bytes)
+    }
+}
+
+/// Record a new segment value: true when it actually changed (so the caller can
+/// bump the matching update counter). Pure, so the counter rule is testable.
+fn note_change(seg: &mut String, new: String) -> bool {
+    if *seg == new {
+        return false;
+    }
+    *seg = new;
+    true
 }
 
 fn lock() -> std::sync::MutexGuard<'static, Out> {
@@ -144,21 +177,36 @@ fn scroll_bytes(prev_len: usize, drawn: bool, line: &str, status: &str) -> Strin
 
 /// Set the hardware-stats segment of the status line (redrawn in place).
 pub fn status_hw(line: impl Into<String>) {
-    set(|o| o.hw = line.into());
+    let mut o = lock();
+    if note_change(&mut o.hw, line.into()) {
+        o.hw_updates += 1;
+    }
+    redraw(&mut o);
 }
 
 /// Set the capture segment of the status line (e.g. the fps line).
 pub fn status_capture(line: impl Into<String>) {
-    set(|o| o.capture = line.into());
+    let mut o = lock();
+    o.fps_ticks += 1;
+    if note_change(&mut o.capture, line.into()) {
+        o.fps_updates += 1;
+    }
+    redraw(&mut o);
 }
 
-fn set(f: impl FnOnce(&mut Out)) {
-    let mut o = lock();
-    f(&mut o);
-    let line = compose(&o.hw, &o.capture, console_width());
-    write_stdout(&redraw_bytes(o.prev_len, &line));
-    o.prev_len = line.chars().count();
-    o.drawn = !line.is_empty();
+/// Redraw the status line in place, but only when its composed content changed.
+fn redraw(o: &mut Out) {
+    if let Some(bytes) = o.render(console_width()) {
+        write_stdout(&bytes);
+    }
+}
+
+/// The status-update counts since start: `(hardware changes, fps changes, fps
+/// ticks)`. Used by the `--stats` rate readout so "as fast as possible" is a
+/// measured number.
+pub fn counters() -> (u64, u64, u64) {
+    let o = lock();
+    (o.hw_updates, o.fps_updates, o.fps_ticks)
 }
 
 /// Emit a scrolling log line above the status line.
@@ -168,6 +216,7 @@ pub fn log(line: impl AsRef<str>) {
     write_stdout(&scroll_bytes(o.prev_len, o.drawn, line.as_ref(), &status));
     o.prev_len = status.chars().count();
     o.drawn = !status.is_empty();
+    o.last = status;
 }
 
 /// Move off the status line so a shell prompt does not overwrite it.
@@ -177,6 +226,7 @@ pub fn finish() {
         write_stdout("\n");
         o.drawn = false;
         o.prev_len = 0;
+        o.last.clear();
     }
 }
 
@@ -270,6 +320,34 @@ impl Drop for LogWriter {
     }
 }
 
+/// Cleared by the console Ctrl+C handler so the watch loops exit cleanly
+/// (flushing a final status line) instead of being killed. A run with no
+/// `--follow-secs` bound runs until this is cleared.
+static RUNNING: AtomicBool = AtomicBool::new(true);
+
+/// Console control handler: ask the running loops to stop.
+#[cfg(windows)]
+unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> windows::core::BOOL {
+    RUNNING.store(false, Ordering::SeqCst);
+    windows::core::BOOL(1)
+}
+
+/// Register the Ctrl+C handler; failure is ignored (the loops still end on
+/// their own bound or when the process is killed).
+pub fn install_ctrl_handler() {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Console::SetConsoleCtrlHandler;
+        // SAFETY: registering a process-global handler with a valid signature.
+        let _ = unsafe { SetConsoleCtrlHandler(Some(ctrl_handler), true) };
+    }
+}
+
+/// True until Ctrl+C / window close was requested.
+pub fn should_run() -> bool {
+    RUNNING.load(Ordering::SeqCst)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +391,56 @@ mod tests {
         assert_eq!(scroll_bytes(3, true, "hi", "abc"), "\r   \rhi\nabc");
         // The status is padded so a shorter one clears the old tail.
         assert_eq!(scroll_bytes(5, true, "x", "ab"), "\r     \rx\nab   ");
+    }
+
+    #[test]
+    fn render_writes_once_and_skips_an_unchanged_line() {
+        // Catches: the status line being rewritten and re-flushed on every
+        // `set()` even when its content is identical — the display path's
+        // dominant cost (one write+flush per hardware poll and per fps tick,
+        // most of which change no character at all).
+        let mut o = Out {
+            hw: "CPU 1%".to_string(),
+            ..Out::default()
+        };
+        let first = o.render(100).expect("the first render must write");
+        assert!(first.contains("CPU 1%"), "{first}");
+        assert_eq!(
+            o.render(100),
+            None,
+            "an identical line must not be rewritten"
+        );
+        o.capture = "60 fps".to_string();
+        let changed = o.render(100).expect("a changed line must write");
+        assert!(changed.contains("60 fps"), "{changed}");
+    }
+
+    #[test]
+    fn render_erases_the_line_when_both_segments_clear() {
+        // Catches: clearing the status (target gone) leaving the old text on
+        // screen because an empty line is treated as "unchanged".
+        let mut o = Out {
+            hw: "CPU 1%".to_string(),
+            ..Out::default()
+        };
+        assert!(o.render(100).is_some(), "draw the first line");
+        o.hw.clear();
+        let clear = o.render(100).expect("clearing must redraw");
+        assert_eq!(
+            clear, "\r      ",
+            "must erase the 6 columns of the old line"
+        );
+    }
+
+    #[test]
+    fn note_change_reports_only_a_real_segment_change() {
+        // Catches: counting an unchanged segment as an update (inflating the
+        // measured rate) or missing a real change (undercounting it).
+        let mut seg = String::new();
+        assert!(note_change(&mut seg, "a".to_string()));
+        assert!(!note_change(&mut seg, "a".to_string()));
+        assert!(note_change(&mut seg, "b".to_string()));
+        assert_eq!(seg, "b");
     }
 
     #[test]

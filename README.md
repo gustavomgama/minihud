@@ -1,26 +1,47 @@
 # minihud
 
-A **headless Windows backend** with two independent halves:
+A **headless Windows backend** that shows hardware stats and FPS:
 
 1. **Hardware stats** — polls CPU / GPU / RAM sensors sourced entirely from
    [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) (LHM)
    and prints them on an interval.
-2. **Present-hook capture** — an **in-process present-hook backend** that injects
-   a recorder into another process and captures one `QueryPerformanceCounter`
-   timestamp per frame (DXGI / D3D9 / OpenGL / Vulkan), the capture foundation
-   for a future on-screen display.
+2. **FPS** — reads the foreground target's FPS from **ETW present events** via a
+   spawned `PresentMon.exe`. This is **tier 0**: no DLL injection, no game hook,
+   nothing loaded into the target, so it is **anti-cheat-safe by construction**.
 
-There is **no UI, no overlay, and no rendering**: the recorder records frames and
-the host prints numbers. The OSD (M2) is deliberately not built — see
-[`HOOKING.md`](HOOKING.md).
+There is **no UI, no overlay, and no rendering**: minihud observes the target and
+prints numbers.
 
 ```
-CPU 12% 55C 45W 4200MHz | RAM 8192/16384MB | GPU 30% 60C 120W 1800x7000MHz | VRAM 4096/8192MB [AMD Ryzen 7 5800X / NVIDIA GeForce RTX 3070]
+CPU 12% 55C 45W 4200MHz | RAM 8192/16384MB | GPU 30% 60C 120W 1800x7000MHz | VRAM 4096/8192MB [AMD Ryzen 7 5800X / NVIDIA GeForce RTX 3070]  |  pid 23996: 84.3 fps  11.87 ms  1% low 61.2
 ```
+
+## FPS capture: tiers and why ETW is the default
+
+| Tool | FPS method | Injects? | Tier |
+|---|---|---|---|
+| PresentMon | ETW `Dxgkrnl` present events | no | 0 |
+| EasyFPS | spawns PresentMon, parses stdout CSV | no | 0 |
+| FpsOverlayer | ETW `DxgKrnl_Present` (event id 184) | no | 0 |
+| **minihud (default / `--follow`)** | **ETW via the PresentMon subprocess** | **no** | **0** |
+| MangoHud | in-process Vulkan layer | yes | 3 |
+
+ETW observes the kernel's present events **out-of-process**, so no anti-cheat
+that blocks injection can stop it. When an anti-cheat blocks the **ETW session**
+itself, minihud degrades gracefully: it logs once, shows `--`, and keeps
+running.
+
+The FPS **cadences are decoupled**: hardware stats refresh on `--interval-ms`
+(default 500 ms; the idle cap `--hw-idle-ms` defaults to 1 = no backoff); the follow
+target is re-resolved every `--poll-ms`. One frametime is captured per present
+into a rolling window (`--fps-window-ms`, default 100 ms; any value ≥ 1 is
+honored literally, and a very small window is meaningless) with a 1% low; the FPS
+status line redraws on its own tick (`--fps-rate-ms`, default 500 ms). `--stats`
+logs the achieved updates-per-second.
 
 ---
 
-## Part 1 — Hardware stats
+## Hardware stats
 
 minihud polls CPU / GPU / RAM sensors and prints one line per poll. Anything LHM
 does not report prints as `--`, never a guess.
@@ -46,85 +67,10 @@ powershell  lhm-bridge.ps1  ->  LhmFeed (thread)  ->  HwPoller  ->  stdout
    +-- stdin "\n" ticks, stdout JSON
 ```
 
-The poll cadence is adaptive: fast while values are moving, backing off when they
-settle (see `ACTIVE_MS` / `IDLE_MS` in `src/main.rs`).
-
----
-
-## Part 2 — Present-hook capture (backend)
-
-An in-process present hook that records **frames only** — no Direct2D/DirectWrite,
-no in-swapchain quad, no overlay window. Full design, hook set, wire format, and
-safety rationale live in [`HOOKING.md`](HOOKING.md); this is the summary.
-
-### What it hooks
-
-| API | Entry points | Mechanism |
-|---|---|---|
-| **DXGI** (D3D11/D3D12) | `Present` (vtbl 8), `Present1` (22), `ResizeBuffers` (13), `SetFullscreenState` (10), `CreateSwapChain` (10), `CreateSwapChainForHwnd` (15), `CreateSwapChainForCoreWindow` (16), `CreateSwapChainForComposition` (24) | COM vtable-slot patch |
-| **D3D12** | `ID3D12CommandQueue::ExecuteCommandLists` (vtbl 10) | COM vtable-slot patch (queue taken from the factory detour) |
-| **D3D9** | `Present` (17), `EndScene` (42), `PresentEx` (121), `ResetEx` (132), `CreateDevice` (16), `CreateDeviceEx` (20) | COM vtable-slot patch |
-| **OpenGL** | `wglSwapBuffers`, `wglSwapLayerBuffers`, `gdi32!SwapBuffers`, `libEGL!eglSwapBuffers` | IAT patch |
-| **Vulkan** | `vkQueuePresentKHR` (+ the loader proc-addr chain) | IAT patch + **implicit layer** |
-
-Vtable indices are copied from the research project's VERIFIED facts and pinned
-by tests in `crates/hook-rt/src/api.rs`. IAT hooks patch the **application's own
-import table** (not the graphics DLL's), including delay-load imports. Vulkan is
-covered three ways: the static `vulkan-1.dll!vkQueuePresentKHR` import, the
-loader's `vkGetInstanceProcAddr`/`vkGetDeviceProcAddr` chain (so however the app
-resolves present, it lands on the recorder), and — for fully-dynamic apps that
-never import the loader — the `hook-vk-layer` **implicit layer**
-(`VK_LAYER_MINIHUD_capture`).
-
-Mechanism: own IAT + COM vtable-slot patching. No third-party hook library. Every
-hook is **fail-open** and the injected code is **panic-free across the FFI
-boundary**.
-
-### Exclusive fullscreen
-
-A target that owns the display in **exclusive fullscreen** refuses any dummy
-device/swapchain creation (flip, bitblt, D3D9, composition) — those calls block
-and can crash it. So the recorder **skips** them there, and instead the **host**
-derives the shared DXGI swapchain vtable's RVA in `dxgi.dll` (from a dummy
-swapchain created in minihud's *own* process) and hands it to the recorder, which
-patches `dxgi_base + rva` — **no device creation in the target**. That captures
-`Present`/`Present1` in a fullscreen-exclusive game (verified live). Injected
-while windowed, the hooks also survive the transition into fullscreen.
-
-### Re-injection
-
-Re-injecting a target that already has a recorder **reuses** it (a second
-recorder on one ring would double-count); if the loaded recorder is an **older
-build**, it is **replaced in place** (unload + reload) — no target restart.
-
-### Injection pipeline
-
-1. `OpenProcess`, refuse WOW64 targets (64-bit only), refuse known anti-cheat.
-2. `VirtualAllocEx` + `WriteProcessMemory` the recorder path; remote `LoadLibraryW`.
-3. Resolve the `mh_install` export and remote-call it; the thread exit code is the
-   installed-API bitmask.
-
-`--launch <exe>` starts the target **suspended**, injects before it creates its
-device, then resumes — closing the "device created before injection" gap.
-
-### Wire format
-
-One named shared mapping, `minihud-frames-<pid>`: a header, a status block
-(installed mask, errors, rescan counters), and a **4096-slot seqlock ring** of
-40-byte records (`seq, qpc_start, qpc_stop, swapchain, flags, api`). The writer
-sets a slot's `seq` odd → payload → even; the reader accepts only a stable slot
-and never returns a torn record. The host computes trailing fps/frametime from
-the QPC timestamps. See `crates/hook-ipc`.
-
-### Safety (tier 3)
-
-An in-process present hook is **tier 3** — detectable. A **deny-list** of known
-anti-cheat modules is refused, and **no Stealth/evasion** techniques are
-implemented — hooks go at the ordinary vtable/IAT sites. Never inject a
-protected title. `minihud` **follows the foreground process by default** (the
-`--follow` lifecycle); pass **`--stats-only`** to run hardware stats without any
-capture, or `--capture-hook`/`--launch`/`--read-frames` for explicit one-shots.
-Details in [`HOOKING.md`](HOOKING.md) §4.
+Hardware stats refresh on a fixed `--interval-ms` cadence (default 500 ms) with
+no idle backoff (`--hw-idle-ms` defaults to 1, which is clamped up to the active
+cadence). The bridge itself reads continuously on `--bridge-ms` (default 1 ms;
+each read costs ~92 ms, so the sensor rate is ~10/s regardless).
 
 ---
 
@@ -133,10 +79,11 @@ Details in [`HOOKING.md`](HOOKING.md) §4.
 - Windows 10/11, x86-64
 - Rust (MSVC toolchain)
 - **.NET Framework 4.7.2** (for the LHM DLL, already present on most installs)
-- Administrator rights for full CPU temp/power (SuperIO) and for cross-process
-  injection. The exe self-elevates at runtime; `MINIHUD_NO_ELEVATE=1` skips it.
-- For capture: a GPU/driver. Vulkan capture needs a Vulkan loader; the implicit
-  layer needs the loader to discover its manifest (see below).
+- Administrator rights for full CPU temp/power (SuperIO) and for the ETW fps
+  session. The exe self-elevates at runtime; `MINIHUD_NO_ELEVATE=1` skips it.
+- For the FPS row: `PresentMon.exe` staged next to the exe (`cargo xtask build`
+  copies it from the committed `tools/presentmon/`; Intel PresentMon, MIT).
+  Optional — without it fps only reads `--`.
 
 ## One-time DLL fetch
 
@@ -162,8 +109,9 @@ cargo xtask clean            # clean target/ and dist/
 
 `cargo xtask build` is what stages everything next to the exe so it resolves
 assets from its own directory: `lhm-bridge.ps1`, `LibreHardwareMonitorLib.dll`,
-the recorder `hook_rt.dll`, and the Vulkan layer `hook_vk_layer.dll` +
-`hook_vk_layer.json`. Plain `cargo build` compiles but does not stage.
+and `PresentMon.exe` (the tier-0 ETW FPS sidecar; staged only when
+`tools/presentmon/PresentMon.exe` is present). Plain `cargo build` compiles but
+does not stage.
 
 ### Hardware stats
 
@@ -171,113 +119,63 @@ the recorder `hook_rt.dll`, and the Vulkan layer `hook_vk_layer.dll` +
 target\debug\minihud.exe --stats-only   # live status line (updates in place); Ctrl+C to stop
 ```
 
-### Capture
+### FPS (default, tier 0)
 
 By default `minihud.exe` **follows the foreground process** and shows its
-**fps/frametime** beside the hardware stats on one self-updating line:
+**fps/frametime + 1% low** beside the hardware stats on one self-updating line,
+read **out-of-process over ETW**. Nothing is injected:
 
 ```powershell
-# default: follow the foreground process + print hardware stats on one console
-target\debug\minihud.exe
-
-# bound the follow, or target a specific exe by name
-target\debug\minihud.exe --follow-secs 30
-target\debug\minihud.exe --match deadlock*.exe
-
-# one-shot capture of an already-running pid (5s)
-target\debug\minihud.exe --capture-hook <pid> 5
-
-# launch a target suspended, inject before it makes its device, then run it
-target\debug\minihud.exe --launch target\debug\hook-test.exe --api d3d11 --frames 600
+target\debug\minihud.exe                          # follow the foreground target (default)
+target\debug\minihud.exe --match deadlock*.exe    # follow a target by name
+target\debug\minihud.exe --follow-secs 30         # bounded run
+target\debug\minihud.exe --fps-pid Overwatch      # explicit fps target
+target\debug\minihud.exe --fps-window-ms 100      # rolling fps window in ms (default 100)
+target\debug\minihud.exe --fps-rate-ms 500        # fps redraw cadence (default)
+target\debug\minihud.exe --stats                  # log achieved updates-per-second
+target\debug\minihud.exe --no-fps                 # hardware only
 ```
 
-The console keeps a **single self-updating status line** at the bottom — the
-hardware stats and, while capturing, the fps/tracking line — with every log
-event scrolling above it. Injection steps log verbosely (`DEBUG`):
-
-```text
-20:00:37 DEBUG inject: pid 23996; recorder staged at C:\Users\...\minihud\hook_rt-ad299d5ac9b0137a.dll
-20:00:37 DEBUG inject: OpenProcess ok
-20:00:37 DEBUG inject: recorder base 0x7ffe51cf0000; mh_install at 0x7ffe51cff4c0 (rva 0xf4c0)
-20:00:37  INFO launched and injected hook-test.exe (pid 23996) — installed hooks 9: dxgi.present, dxgi.present1, dxgi.resizebuffers, dxgi.setfullscreen, d3d9.createdevice, gl.wglswapbuffers, ...
-CPU 10% 79C 55W 4441MHz | RAM 15190/32692MB | GPU 37% 57C 81W 1725x7800MHz | VRAM 5115/8192MB [AMD Ryzen 7 5800X3D / NVIDIA GeForce RTX 3070]  |  pid 23996: 84.3 fps  11.87 ms  (dxgi.present x72)
-```
-(the bottom line updates in place; only events scroll. It is truncated to the
-console width so it never wraps.) Set `RUST_LOG` to change verbosity (default:
-`info,minihud::hook=debug`).
-
-Re-injecting a process that already has a recorder **reuses** it (a second
-recorder on one ring would double-count and confuse the status). A ring that
-stops advancing is shown as `no new frames (stale)` rather than a frozen fps.
-
-Injection **stages a content-addressed copy** of the recorder under
-`%LOCALAPPDATA%\minihud\` and loads *that*, so a hooked target never locks a
-file inside `target/`. `cargo build` / `cargo clean` keep working while a game
-is hooked; the copy is released when the target exits, and stale copies are
-pruned on the next injection. (`cargo xtask clean` also never fails on a file a
-running process holds — it reports it and continues.)
-
-Vulkan **implicit layer** (fully-dynamic apps), no injection — point the loader at
-the manifest dir (non-elevated testing only; production registration is a
-machine-wide registry value documented in `HOOKING.md` §4.1):
-
-```powershell
-$env:VK_ADD_IMPLICIT_LAYER_PATH = "target\debug"
-target\debug\hook-test.exe --api vulkan-dynamic --frames 2000
-# observe the ring the layer created, read-only, no elevation:
-$env:MINIHUD_NO_ELEVATE = "1"
-target\debug\minihud.exe --read-frames <pid|name> 4
-```
+`fps: ETW (tier 0, no injection)` is logged at start. If an anti-cheat blocks
+the ETW session, the fps reads `--` and the run keeps going.
 
 ## CLI reference
 
 ```text
-minihud                                    follow a target + print hardware stats (default)
-minihud --stats-only                       print hardware stats only (no capture)
-minihud --capture-hook <pid|name> [secs]   inject the recorder into a running process
-minihud --read-frames <pid|name> [secs]    observe an existing frame ring (no injection)
-minihud --launch <exe> [args...]           start <exe> suspended, inject, then run it
+minihud                                    show the foreground target's fps + hardware stats (default)
+minihud --stats-only                       print hardware stats only (no fps)
 minihud --follow [--match <glob>] [--poll-ms <n>] [--follow-secs <n>]
 minihud -h | --help                        print help
 
 <pid|name> is a numeric pid or a process image name (case-insensitive, `.exe`
 optional): `Overwatch`, `overwatch.exe`, or `1234` all work.
 
-Capture flags (each prints the hardware stats on the same console):
---capture-hook <pid|name> [secs]  inject the recorder into an already-running process and
-                             print fps/frametime + tracking; [secs] = window
-                             (default: until Ctrl+C). Needs elevation.
---launch <exe> [args...]     launch <exe> suspended, inject before it creates its device
-                             (so the D3D12 command queue is reachable), resume, then capture
-                             until it exits. Everything after <exe> goes to the child.
-                             Needs elevation.
---launch-secs <n>            with --launch, capture for <n> seconds instead of until exit.
-                             Must precede --launch.
---read-frames <pid|name> [secs]  open an existing frame ring read-only (no injection) and print
-                             fps; use it for a ring the Vulkan implicit layer created.
-                             No elevation. [secs] defaults to until Ctrl+C.
---follow                     watch the foreground process and manage the hook lifecycle
-                             (detect -> inject -> retarget -> unhook). This is the DEFAULT,
-                             and it shows the hooked target's fps beside the hardware stats.
-                             Needs elevation; Ctrl+C to stop.
+FPS (default; tier 0, ETW, never injects):
+--fps / --no-fps             enable / disable the ETW fps readout (default: on).
+--fps-window-ms <n>          rolling fps window in ms (default 100). Any value >= 1 is
+                             honored literally; below ~1 frame of history the readout is
+                             meaningless, so a tiny window is your choice.
+--fps-rate-ms <n>            fps status-line redraw cadence in ms (default 500).
+--fps-pid <pid|name>         explicit fps target (default: the followed/foreground target).
+--follow                     follow the foreground target (or --match) and show its fps via
+                             ETW. This is the DEFAULT; Ctrl+C to stop. Needs elevation (ETW).
 --match <glob>               with --follow, target an exe by case-insensitive glob instead of
                              the foreground process (e.g. deadlock*.exe).
---poll-ms <n>                with --follow, how often to re-check the target (default 400).
+--poll-ms <n>                with --follow, how often to re-check the target (default: the
+                             --interval-ms value, 500 ms).
+                             The fps line redraws faster, on its own tick (--fps-rate-ms).
 --follow-secs <n>            with --follow, stop after <n> seconds (default: until Ctrl+C).
---interval-ms <n>            poll cadence in ms for the hardware stats and the fps line
-                             (default 400).
---stats-only                 print hardware stats only; never capture.
+--interval-ms <n>            active hardware-stats poll cadence in ms (default 500).
+--hw-idle-ms <n>             idle backoff cap in ms once values settle (default 1 = no
+                             backoff; clamped up to --interval-ms).
+--bridge-ms <n>              LHM bridge tick in ms — how often sensors are read (default 1;
+                             1 = read continuously — each read costs ~92 ms, so the sensor
+                             rate is ~10/s regardless).
+--stats                      log the achieved hw/fps updates-per-second once a second
+                             (and the fps tick cadence).
+--stats-only                 print hardware stats only; never show fps.
 
-MINIHUD_HOOK_DLL=<name>      inject an alternate recorder DLL from the exe's directory
-                             (e.g. a fresh build while a live target holds the default name).
 MINIHUD_NO_ELEVATE=1         skip the UAC self-elevation (headless tests/diagnostics).
-```
-
-The validation target `hook-test.exe` drives one real detour per presenter:
-
-```text
-hook-test.exe --api <d3d11|d3d11-factory|d3d9|d3d9ex|d3d12|vulkan|vulkan-dynamic|
-                     opengl|opengl-delay|opengl-layer|angle|egl|dcomp> [--frames N] [--dynamic] [--fullscreen]
 ```
 
 ## Project layout
@@ -286,21 +184,17 @@ hook-test.exe --api <d3d11|d3d11-factory|d3d9|d3d9ex|d3d12|vulkan|vulkan-dynamic
 src/main.rs          entry point: elevation, CLI dispatch, poll loop
 src/render.rs        text rendering of one HwStats sample (pure, tested)
 src/hw/              LHM sidecar feed + HwStats fields + adaptive poller
-src/hook/mod.rs      host injector + ring reader + --capture-hook/--read-frames/--launch
-src/hook/proc.rs     process/module helpers (Toolhelp, WOW64/anti-cheat refusal)
-src/hook/follow.rs   --follow orchestrator (detect -> inject -> unhook -> re-target)
-
-crates/hook-ipc/     wire format: block layout, seqlock ring, mapping, trailing fps
-crates/hook-rt/      the injected recorder (cdylib): IAT + vtable patching, detours
-crates/hook-vk-layer/ the Vulkan implicit layer (cdylib): vkQueuePresentKHR capture
-crates/hook-test/    the presenter / validation target (not shipped product)
+src/fps/window.rs    rolling frametime window + fps/1%-low math (pure, tested)
+src/fps/presentmon.rs PresentMon.exe sidecar feed (spawn, CSV parse, degradation)
+src/fps/follow.rs    default/--follow ETW orchestrator (target -> PresentMon -> status)
+src/hook/proc.rs     process helpers (foreground window, Toolhelp process list)
+src/hook/follow.rs   follow target selection (glob/foreground/skip rules)
 
 tools/lhm/           lhm-bridge.ps1 + LibreHardwareMonitorLib.dll
+tools/presentmon/    PresentMon.exe (tier-0 ETW collector; Intel, MIT)
 tools/audit.ps1      full audit (local == CI)
 tools/critic.ps1     code-quality subset (coverage, CRAP, duplication)
-tools/coverage-live.ps1  live-injection coverage of the injected DLLs
 xtask/               build/run/dist/clean helper
-HOOKING.md           the present-hook backend spec (source of truth)
 audit.md             development log (per-pass findings, coverage numbers)
 deny.toml            cargo-deny license/source policy
 build.rs, minihud.manifest   elevation / DPI manifest embedding
@@ -333,11 +227,9 @@ powershell -ExecutionPolicy Bypass -File tools/critic.ps1   # gate
 Runs coverage (`cargo-llvm-cov`), CRAP (`cargo-crap --fail-above 30`),
 duplication (`jscpd --threshold 5`), and advisory `rustqual` / `mete` reports.
 The CRAP gate scores shipped product code: it excludes the entry point, the build
-script, `xtask`, and `crates/hook-test` (the GPU validation tool, not shipped
-product), and allows the functions reachable only through a live target injection
-(`inject`/`unhook`/`capture_hook`/`run`, the `--launch` orchestrators) or a real
-module base (`install_iat_in_module`). Non-destructive (writes `lcov.info` +
-`target/`).
+script, and `xtask`, and allows the tier-0 ETW live-only functions that only run
+against a real PresentMon child (`run`/`read_frames`/`session`/`supervise`).
+Non-destructive (writes `lcov.info` + `target/`).
 
 ### Full audit (local == CI)
 
@@ -350,21 +242,13 @@ The same checks run in CI (`.github/workflows/audit.yml`): `fmt`, `clippy`,
 duplication gates, and advisory `rustqual` / `mete`. `tools/critic.ps1` is the
 quality subset of the same gate.
 
-### Live-injection coverage (on demand)
+## PresentMon
 
-The gate is deterministic and runs no real injection, so the host's live-only
-functions and the injected DLLs' hot paths stay hidden. On a machine with a GPU,
-measure them for real:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/coverage-live.ps1
-```
-
-It builds `hook-test` + the recorder, runs the host instrumented against the
-presenters, checks each scenario's expected api labels, and prints the coverage
-summary and per-function hit table for the host and the injected DLLs. Not part
-of CI (no GPU there). Recorded numbers live in `audit.md` (Pass 25: `hook-rt`
-~89% lines, `hook-vk-layer` ~79% lines, all detour arms firing, 0 errors).
+The tier-0 FPS path spawns `PresentMon.exe` (staged by `cargo xtask build` from
+`tools/presentmon/PresentMon.exe`). PresentMon is Intel's ETW present-event
+collector, released under the **MIT license**; minihud ships the binary
+unmodified and only reads its stdout CSV. If the binary is absent, the build
+warns (it is an **optional** asset) and the fps row reads `--`.
 
 ## License
 

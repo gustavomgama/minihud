@@ -31,14 +31,11 @@ Invoke-Step 'deny'        { cargo deny check }
 Invoke-Step 'audit'       { cargo audit }
 Invoke-Step 'coverage'    { cargo llvm-cov --workspace --lcov --output-path lcov.info }
 # CRAP scores shipped product code. `--exclude` drops the entry point, build
-# script, xtask and the hook-test GPU validation tool (not shipped). `--allow`
-# hides the seven functions reachable only through a live target injection
-# (`inject`/`unhook`/`capture_hook`/`run` and the `--launch` orchestrators
-# `launch_and_inject`/`launch_capture`) or a real module base
-# (`install_iat_in_module`) — no in-process unit test can exercise them, so a
-# complex-but-0%-covered function must not red the gate. Everything else is in
-# scope.
-Invoke-Step 'crap'        { cargo crap --lcov lcov.info --exclude 'src/main.rs' --exclude 'build.rs' --exclude 'xtask/**' --exclude 'crates/hook-test/**' --allow 'inject' --allow 'unhook' --allow 'capture_hook' --allow 'run' --allow 'launch_and_inject' --allow 'launch_capture' --allow 'install_iat_in_module' --allow 'hook_dll_path' --allow 'print_sample' --allow 'load_recorder' --allow 'unload_recorder' --allow 'call_mh_install' --allow 'swapchain_vtable_rva' --threshold 30 --fail-above }
+# script and xtask. `--allow` hides the tier-0 ETW live-only functions that only
+# run against a real PresentMon child (`run`/`read_frames`/`session`/
+# `supervise`) — no in-process unit test can exercise them, so a complex-but-0%-
+# covered function must not red the gate. Everything else is in scope.
+Invoke-Step 'crap'        { cargo crap --lcov lcov.info --exclude 'src/main.rs' --exclude 'build.rs' --exclude 'xtask/**' --allow 'run' --allow 'read_frames' --allow 'session' --allow 'supervise' --threshold 30 --fail-above }
 Invoke-Step 'duplication' { jscpd src --min-lines 5 --threshold 5 }
 
 Write-Host '== rustqual (advisory) ==' -ForegroundColor Cyan

@@ -68,8 +68,12 @@ pub struct HwPoller {
 }
 
 impl HwPoller {
-    pub fn new(active_ms: u64, idle_ms: u64) -> Self {
-        Self::with_feed(active_ms, idle_ms, Box::new(LhmFeed::start()))
+    pub fn new(active_ms: u64, idle_ms: u64, bridge_ms: u64) -> Self {
+        Self::with_feed(
+            active_ms,
+            idle_ms,
+            Box::new(LhmFeed::start_with_poll(bridge_ms)),
+        )
     }
 
     /// Build a poller over an arbitrary feed (used by tests).
@@ -113,6 +117,20 @@ impl HwPoller {
     pub fn cached(&self) -> &HwStats {
         &self.cached
     }
+
+    /// How long until the next poll is due (`Duration::ZERO` when already due).
+    /// The caller sleeps exactly this instead of a fixed slice, so an update is
+    /// never delayed by up to one slice.
+    pub fn due_in(&self) -> Duration {
+        wait_until(Instant::now(), self.last, self.next)
+    }
+}
+
+/// How long to wait before the next poll is due: the cadence minus the time
+/// already elapsed since the last poll. Zero when already due. Pure, so the
+/// scheduling math is unit-tested without sleeping.
+pub(crate) fn wait_until(now: Instant, last: Instant, cadence: Duration) -> Duration {
+    cadence.saturating_sub(now.saturating_duration_since(last))
 }
 
 /// True when `cur` moved beyond idle noise from `prev`. A `None` prev (the
@@ -288,5 +306,41 @@ mod tests {
             "a due poll returns even with no sample"
         );
         assert_eq!(p.cached().cpu_percent, 0.0);
+    }
+
+    #[test]
+    fn wait_until_returns_the_remaining_cadence_or_zero() {
+        // Catches: a fixed sleep slice quantizing every update (up to a whole
+        // slice of added latency) or a zero/negative wait busy-spinning.
+        let now = Instant::now();
+        assert_eq!(
+            wait_until(now, now, Duration::from_millis(100)),
+            Duration::from_millis(100),
+            "no time elapsed -> wait the whole cadence"
+        );
+        let last = now - Duration::from_millis(30);
+        assert_eq!(
+            wait_until(now, last, Duration::from_millis(100)),
+            Duration::from_millis(70),
+            "30ms into a 100ms cadence -> 70ms left"
+        );
+        let overdue = now - Duration::from_millis(150);
+        assert_eq!(
+            wait_until(now, overdue, Duration::from_millis(100)),
+            Duration::ZERO,
+            "overdue -> do not sleep"
+        );
+    }
+
+    #[test]
+    fn due_in_is_zero_right_after_a_due_poll() {
+        // Catches: the poller reporting a stale/zero wait so the loop either
+        // busy-spins or sleeps past the next due poll.
+        let feed = FixedFeed(vec![sensor("Load", "CPU Total", 42.0)]);
+        let mut p = HwPoller::with_feed(200, 1000, Box::new(feed));
+        assert!(p.update().is_some());
+        let d = p.due_in();
+        assert!(d > Duration::ZERO, "after a poll there is a wait: {d:?}");
+        assert!(d <= Duration::from_millis(200), "within the cadence: {d:?}");
     }
 }

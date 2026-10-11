@@ -18,24 +18,17 @@ use std::process::{Command, ExitCode};
 pub(crate) const PKG: &str = "minihud";
 pub(crate) const EXE: &str = "minihud.exe";
 
-/// The injected runtime, a `cdylib` built alongside the exe as `hook_rt.dll`
-/// (not an exe). Staged next to the product so `--capture-hook` works.
-pub(crate) const HOOK_RT_PKG: &str = "hook-rt";
-pub(crate) const HOOK_RT_DLL: &str = "hook_rt.dll";
-
-/// The Vulkan implicit layer, a `cdylib` built as `hook_vk_layer.dll`, and its
-/// loader manifest. Both are staged together so the manifest's relative
-/// `library_path` resolves; registering the manifest is documented in HOOKING.md.
-pub(crate) const HOOK_VK_LAYER_PKG: &str = "hook-vk-layer";
-pub(crate) const HOOK_VK_LAYER_DLL: &str = "hook_vk_layer.dll";
-pub(crate) const HOOK_VK_LAYER_MANIFEST: &str = "crates/hook-vk-layer/hook_vk_layer.json";
+/// Workspace-relative path of the tier-0 FPS collector, staged next to the exe
+/// so `minihud` can spawn it (see `src/fps/presentmon.rs`). Optional: without it
+/// the fps row reads `--`.
+pub(crate) const PRESENTMON_REL: &str = "tools/presentmon/PresentMon.exe";
 
 /// Assets copied next to the built exe and into `dist/`.
 /// `(path relative to workspace root, required)`.
 pub(crate) const ASSETS: &[(&str, bool)] = &[
     ("tools/lhm/lhm-bridge.ps1", true),
     ("tools/lhm/LibreHardwareMonitorLib.dll", false),
-    (HOOK_VK_LAYER_MANIFEST, false),
+    (PRESENTMON_REL, false),
 ];
 
 /// Win32 error codes we treat as "locked" (a running exe holds the file).
@@ -175,10 +168,10 @@ mod tests {
     fn parse_args_handles_release_and_passthrough() {
         // Catches: dropping `--release` (a debug build shipped by mistake) or
         // leaking `--name value` into the passthrough args.
-        let p = parse_args(&a(&["run", "--release", "--", "--capture-hook", "42"])).unwrap();
+        let p = parse_args(&a(&["run", "--release", "--", "--match", "deadlock*.exe"])).unwrap();
         assert_eq!(p.cmd, "run");
         assert!(p.release);
-        assert_eq!(p.passthrough, a(&["--capture-hook", "42"]));
+        assert_eq!(p.passthrough, a(&["--match", "deadlock*.exe"]));
     }
 
     #[test]
