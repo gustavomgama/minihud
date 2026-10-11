@@ -9,8 +9,9 @@ A **headless Windows backend** that shows hardware stats and FPS:
    spawned `PresentMon.exe`. This is **tier 0**: no DLL injection, no game hook,
    nothing loaded into the target, so it is **anti-cheat-safe by construction**.
 
-There is **no UI, no overlay, and no rendering**: minihud observes the target and
-prints numbers.
+The default build has **no UI, no overlay, and no rendering**: minihud observes
+the target and prints numbers. An optional **OSD overlay** is available behind
+the `gui` feature — see [OSD overlay](#osd-overlay---gui).
 
 ```
 CPU 12% 55C 45W 4200MHz | RAM 8192/16384MB | GPU 30% 60C 120W 1800x7000MHz | VRAM 4096/8192MB [AMD Ryzen 7 5800X / NVIDIA GeForce RTX 3070]  |  pid 23996: 84.3 fps  11.87 ms  1% low 61.2
@@ -145,6 +146,7 @@ the ETW session, the fps reads `--` and the run keeps going.
 ```text
 minihud                                    show the foreground target's fps + hardware stats (default)
 minihud --stats-only                       print hardware stats only (no fps)
+minihud --gui                              show the OSD overlay (build with --features gui)
 minihud --follow [--match <glob>] [--follow-secs <n>]
 minihud -h | --help                        print help
 
@@ -170,6 +172,22 @@ FPS (default; tier 0, ETW, never injects):
 MINIHUD_NO_ELEVATE=1         skip the UAC self-elevation (headless tests/diagnostics).
 ```
 
+## OSD overlay (`--gui`)
+
+An optional, fully customizable on-screen display: a transparent, always-on-top,
+**click-through** panel (built with `egui`/`eframe`) showing FPS plus CPU / GPU /
+RAM. It is **off by default** so the headless build stays lean.
+
+```powershell
+cargo build --features gui        # or: cargo xtask build --features gui
+target\debug\minihud.exe --gui
+```
+
+Configured entirely by an optional `minihud.toml` (see `minihud.toml.example`):
+density (`zen` / `standard` / `full`), corner `anchor`, `margin_px`, `opacity`,
+`scale`, `accent` (thermal gradient or a fixed hue), `poll_ms`, `fade_idle_secs`.
+No file = sensible defaults; out-of-range numbers clamp; unknown keys error.
+
 ## Project layout
 
 ```text
@@ -181,6 +199,11 @@ src/fps/presentmon.rs PresentMon.exe sidecar feed (spawn, CSV parse, degradation
 src/fps/follow.rs    default/--follow ETW orchestrator (target -> PresentMon -> status)
 src/hook/proc.rs     process helpers (foreground window, Toolhelp process list)
 src/hook/follow.rs   follow target selection (glob/foreground/skip rules)
+src/gui/model.rs     OSD row model (pure, tested)
+src/gui/config.rs    minihud.toml schema (pure, tested)
+src/gui/theme.rs     thermal accent + load thresholds (pure, tested)
+src/gui/layout.rs    anchor + content-size geometry (pure, tested)
+src/gui/app.rs       egui/eframe overlay window (feature `gui`)
 
 tools/lhm/           lhm-bridge.ps1 + LibreHardwareMonitorLib.dll
 tools/presentmon/    PresentMon.exe (tier-0 ETW collector; Intel, MIT)

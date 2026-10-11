@@ -44,7 +44,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 5. [~] Accent theming done (`gui::theme`: thermal gradient + load thresholds);
    densities (Zen/Standard/Full row selection) done (`gui::model::rows_for`).
 6. [x] `--gui` wiring in `main.rs`; `cargo xtask` staging.
-7. [ ] README/CHANGELOG; commit + push `gui`.
+7. [x] README/CHANGELOG; commit + push `gui`.
 8. [~] Polish: anchor/corner positioning ✅, content-fit window size ✅,
    `scale` ✅, hairline ✅, monospace figures ✅. Remaining: live FPS feed in
    GUI mode.
@@ -84,3 +84,5 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   live** with `anchor=bottom-right, density=full, scale=1.2, accent=amber`: the
   panel rendered 312x257 (fit, not 353), 7 rows, amber hero, hairline. Gate
   green (169 tests, both feature sets).
+- 2026-10-11: Docs (item 7): `minihud.toml.example`, README "OSD overlay" section
+  + CLI/layout entries, CHANGELOG "Unreleased". Gate green (169 tests).

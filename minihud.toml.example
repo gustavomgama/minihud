@@ -1,0 +1,39 @@
+# minihud OSD overlay — example configuration.
+#
+# Every key is optional. With no file at all, the overlay still works with the
+# defaults below; this file just shows the full surface for people who want it.
+#
+# Location: minihud reads `minihud.toml` next to the executable, then in the
+# working directory. The first one found wins.
+#
+# Build the overlay with:  cargo build --features gui
+# Then run:                minihud --gui
+
+# How much detail to show.
+#   "zen"      — FPS + one hero metric (GPU load)
+#   "standard" — FPS + CPU / RAM / GPU  (default)
+#   "full"     — every hardware field
+density = "standard"
+
+# Which screen corner the panel sits in.
+#   "top-left" | "top-right" | "bottom-left" | "bottom-right"
+anchor = "top-left"
+
+# Distance from the screen edge, in points.
+margin_px = 16
+
+# Panel background opacity, 0.1..=1.0.
+opacity = 0.72
+
+# UI scale, 0.5..=3.0. Multiplies fonts, bars and the panel size.
+scale = 1.0
+
+# Accent tone. "thermal" drifts cool->warm with temperature; the rest are fixed.
+#   "thermal" | "cyan" | "amber" | "lime" | "magenta"
+accent = "thermal"
+
+# Hardware poll cadence in ms, 100..=10000.
+poll_ms = 500
+
+# Fade the panel out after this many seconds with no change. 0 = never fade.
+fade_idle_secs = 0

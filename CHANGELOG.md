@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- **OSD overlay (`--gui`).** A transparent, always-on-top, click-through OSD
+  showing FPS plus CPU / GPU / RAM, drawn with `egui`/`eframe`. Off by default;
+  build with `cargo build --features gui` (or `cargo xtask build --features gui`).
+- **`minihud.toml`.** Fully optional config: density (`zen` / `standard` /
+  `full`), corner `anchor`, `margin_px`, `opacity`, `scale`, `accent`, `poll_ms`,
+  `fade_idle_secs`. Missing file = sensible defaults; out-of-range numbers clamp;
+  unknown keys error. See `minihud.toml.example`.
+- **Thermal accent.** The accent hue drifts cool→warm with temperature; load bars
+  run calm → amber → alarm.
+
 ## 1.0.0
 
 First stable release: tier-0 ETW FPS and LibreHardwareMonitor hardware stats,
