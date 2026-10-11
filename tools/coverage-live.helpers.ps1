@@ -33,6 +33,7 @@ function Get-ScenarioEvidence {
     'rt-opengl-layer'  = @('6detour22wgl_swap_layer_buffers')
     'rt-angle'         = @('6detour16egl_swap_buffers')
     'rt-dcomp'         = @('6detour33create_swap_chain_for_composition')
+    'rt-d3d11-fullscreen' = @('6detour12dxgi_present')
     'rt-vulkan'        = @('6detour16vk_queue_present')
     'rt-capture'       = @('6detour12dxgi_present')
     'layer'            = @('13hook_vk_layer16mh_queue_present')
@@ -122,6 +123,7 @@ function Get-ScenarioExpectedLabels {
     'rt-opengl-layer'  = @{ Required = @('gl.wglswaplayerbuffers');  Forbidden = @('gl.gdiswapbuffers') }
     'rt-angle'         = @{ Required = @('gl.eglswapbuffers');       Forbidden = @() }
     'rt-dcomp'         = @{ Required = @('dxgi.present');            Forbidden = @() }
+    'rt-d3d11-fullscreen' = @{ Required = @('dxgi.present');         Forbidden = @() }
     'rt-vulkan'        = @{ Required = @('vk.queuepresent');         Forbidden = @() }
     'rt-capture'       = @{ Required = @('dxgi.present');            Forbidden = @() }
   }

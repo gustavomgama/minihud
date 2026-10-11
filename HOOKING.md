@@ -160,8 +160,11 @@ An in-process present hook is **tier 3** ("inline hooks on the graphics present
 path", `docs/03` §2) — detectable by inline checks, module enumeration and
 memory scans. Therefore:
 
-- **Opt-in only.** Nothing injects unless `--capture-hook <pid>` is passed.
-  The CLI is the explicit consent step; elevation is requested separately.
+- **Follow by default; `--stats-only` opts out.** With no arguments, `minihud`
+  runs the `--follow` lifecycle against the foreground process (inject on
+  focus, unhook on change). `--stats-only` runs hardware stats without ever
+  injecting; `--capture-hook`/`--launch`/`--read-frames` are explicit one-shots.
+  Elevation is requested separately.
 - **Deny-list.** The injector refuses a target with a known anti-cheat module
   loaded (`EasyAntiCheat`, `BattlEye`/`BEDaisy`/`BEService`, `vanguard`/`vgtray`/
   `vgk`, `Denuvo`/`Irdeto`, `FACEIT`, `ESEA`, `EQU8`, `XIGNCODE`, `nProtect`,
@@ -256,8 +259,43 @@ test unelevated. `DISABLE_MINIHUD_VK_LAYER=1` disables the layer at runtime
   non-zero, so an injected recorder stays the single writer. A layer-only process
   (fully-dynamic Vulkan, no injection) still sees mask `0` and records normally.
   Prefer the layer for fully-dynamic apps and injection for the rest; if the
-  recorder installs *after* the layer has already published, a few early presents
-  can still be counted twice before the layer defers.
+   recorder installs *after* the layer has already published, a few early presents
+   can still be counted twice before the layer defers.
+- **Already-running target (post-hoc injection).** Injecting into a target that
+  has already created its swapchain still captures DXGI present: the bootstrap
+  patches the shared `IDXGISwapChain` vtable, which the existing swapchain shares
+  (verified live against a D3D12 game at its present cadence). The D3D12
+  `ExecuteCommandLists` hook is **not** installed in that case — it is taken from
+  the `CreateSwapChain*` detour's device argument, which already ran before
+  injection — so only the present is captured (enough for fps). Use `--launch`
+  (suspended inject) to also reach the command queue.
+- **Bootstrap swapchain window.** The dummy DXGI swapchain is created on a
+  dedicated **hidden window** owned by the recorder, not on `GetDesktopWindow()`.
+  A target that already owns the display can refuse a desktop-window swapchain
+  with `E_ACCESSDENIED` (observed live against a fullscreen D3D12 game), which
+  would leave DXGI capture entirely absent; a process-owned window is accepted.
+- **Launch-time bootstrap retry.** A target that already owns the display can
+  still refuse the dummy **device** creation (`E_ACCESSDENIED`) — observed when
+  injecting a game at launch, while object/factory creation succeeds. The rescan
+  thread therefore retries the vtable bootstrap for the first 15 s
+  (`BOOTSTRAP_RETRY_MS`) while no present hook is installed, and republishes the
+  mask, so a launch-time injection self-heals once the display settles. One
+  recorder per process is enforced host-side: re-injecting a target that already
+  has a recorder **reuses** it rather than loading a second (which would put two
+  writers on one ring).
+- **Exclusive-fullscreen capture — the RVA swapchain patch.** A target that owns
+  the display in **exclusive fullscreen** makes *any* dummy device/swapchain
+  creation (flip, bitblt, D3D9, composition) **block ~8 s and crash it** (verified
+  live). So the recorder **skips** those bootstraps there (`invasive_bootstrap_allowed`,
+  `SHQueryUserNotificationState`). Instead the **host** derives the shared DXGI
+  swapchain vtable's **RVA in `dxgi.dll`** by creating a dummy swapchain in *its
+  own* process (where one is allowed), and passes it to `mh_install` (as the call
+  param). The recorder patches `dxgi_base + rva` — slots `Present`/`Present1`/
+  `ResizeBuffers`/`SetFullscreenState` — with **no device creation in the target**.
+  `dxgi.dll` and its vtable are identical on the machine, so the RVA matches.
+  Verified live: a fullscreen-exclusive D3D12 game captured at its present cadence
+  with **no crash**. (`MINIHUD_SKIP_INVASIVE=1` skips the invasive bootstraps, for
+  testing the RVA path in isolation.)
 
 ## 7. Build & run
 
@@ -279,6 +317,20 @@ artifact name; a hyphenated spelling is also accepted). The layer's DLL and
 manifest must sit together in the `VK_ADD_IMPLICIT_LAYER_PATH` directory
 (`hook_vk_layer.dll` + `hook_vk_layer.json`); `cargo xtask build` stages both
 into `target/<profile>/` and `cargo xtask dist` into `dist/`.
+
+Set `MINIHUD_HOOK_DLL=<name>` to inject an alternate recorder DLL from the exe's
+directory — e.g. a fresh build while a live target still holds the default file
+name loaded (a running target locks the DLL it loaded, so `cargo build` cannot
+overwrite it).
+
+**Build-tree isolation.** Injection does not load the build artifact directly.
+It copies the recorder to a content-addressed path under
+`%LOCALAPPDATA%\minihud\hook_rt-<hash>.dll` and loads that, so a hooked target
+never locks anything in `target/` — `cargo build`/`cargo clean` keep working
+while a game is hooked. A rebuilt recorder gets a new hash/name, so a locked
+older copy is never overwritten; stale copies are pruned best-effort (a locked
+one is left until its target exits, which releases it). `cargo xtask clean`
+likewise reports — never fails on — a file a running process holds.
 
 ### 7.1 Live-injection coverage (on demand)
 

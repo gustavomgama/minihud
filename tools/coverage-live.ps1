@@ -212,12 +212,14 @@ $ScenarioAttempts = 3
 
 # One `--launch` attempt: run, wait for the target to exit, return its record.
 function Invoke-LaunchAttempt {
-  param([string]$Tag, [string]$Api, [int]$Frames, [int]$Attempt)
+  param([string]$Tag, [string]$Api, [int]$Frames, [int]$Attempt, [switch]$Fullscreen)
   $env:LLVM_PROFILE_FILE = (Join-Path $injDir "$Tag-%p-%m.profraw")
   $outFile = Join-Path $injDir "$Tag.minihud.out"
   $errFile = Join-Path $injDir "$Tag.minihud.err"
+  $launchArgs = @('--launch', $htExe, '--api', $Api, '--frames', "$Frames")
+  if ($Fullscreen) { $launchArgs += '--fullscreen' }
   $hostProc = Start-Process -FilePath $minihud `
-    -ArgumentList @('--launch', $htExe, '--api', $Api, '--frames', "$Frames") `
+    -ArgumentList $launchArgs `
     -PassThru -NoNewWindow -RedirectStandardOutput $outFile -RedirectStandardError $errFile
   $hostPid = $hostProc.Id
   $hostProc.WaitForExit()
@@ -236,12 +238,13 @@ function Invoke-LaunchAttempt {
 
 # `--launch`, retried until the target profile is collected (or attempts run out).
 function Invoke-LaunchScenario {
-  param([string]$Tag, [string]$Api, [int]$Frames)
-  Write-Host "== DLL live: --launch $Api ==" -ForegroundColor Cyan
+  param([string]$Tag, [string]$Api, [int]$Frames, [switch]$Fullscreen)
+  $mode = if ($Fullscreen) { "$Api --fullscreen" } else { $Api }
+  Write-Host "== DLL live: --launch $mode ==" -ForegroundColor Cyan
   $rec = $null
   for ($attempt = 1; $attempt -le $ScenarioAttempts; $attempt++) {
     Remove-ScenarioProfraw -Tag $Tag
-    $rec = Invoke-LaunchAttempt -Tag $Tag -Api $Api -Frames $Frames -Attempt $attempt
+    $rec = Invoke-LaunchAttempt -Tag $Tag -Api $Api -Frames $Frames -Attempt $attempt -Fullscreen:$Fullscreen
     if (@($rec.Files).Count -gt 0) { return $rec }
     if ($attempt -lt $ScenarioAttempts) {
       Write-Host ("   attempt {0}/{1}: no target profraw; retrying" -f $attempt, $ScenarioAttempts) -ForegroundColor Yellow
@@ -370,6 +373,10 @@ try {
     [pscustomobject]@{ Tag='rt-opengl-delay';  Api='opengl-delay';  Frames=$Frames }
     [pscustomobject]@{ Tag='rt-opengl-layer';  Api='opengl-layer';  Frames=$Frames }
     [pscustomobject]@{ Tag='rt-dcomp';         Api='dcomp';         Frames=$Frames }
+    # Exclusive fullscreen: `--launch` injects *before* the target goes
+    # fullscreen, so the present hook installs and then survives the transition
+    # (the real exclusive-fullscreen acceptance case).
+    [pscustomobject]@{ Tag='rt-d3d11-fullscreen'; Api='d3d11';      Frames=$Frames; Fullscreen=$true }
   )
   if (-not $skipReasons.ContainsKey('rt-angle')) {
     $launchScenarios += [pscustomobject]@{ Tag='rt-angle'; Api='angle'; Frames=$Frames }
@@ -377,7 +384,7 @@ try {
 
   $records = New-Object System.Collections.ArrayList
   foreach ($s in $launchScenarios) {
-    $r = Invoke-LaunchScenario -Tag $s.Tag -Api $s.Api -Frames $s.Frames
+    $r = Invoke-LaunchScenario -Tag $s.Tag -Api $s.Api -Frames $s.Frames -Fullscreen:$s.Fullscreen
     Format-ScenarioRecord $r
     [void]$records.Add($r)
   }

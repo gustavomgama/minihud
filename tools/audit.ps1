@@ -38,7 +38,7 @@ Invoke-Step 'coverage'    { cargo llvm-cov --workspace --lcov --output-path lcov
 # (`install_iat_in_module`) — no in-process unit test can exercise them, so a
 # complex-but-0%-covered function must not red the gate. Everything else is in
 # scope.
-Invoke-Step 'crap'        { cargo crap --lcov lcov.info --exclude 'src/main.rs' --exclude 'build.rs' --exclude 'xtask/**' --exclude 'crates/hook-test/**' --allow 'inject' --allow 'unhook' --allow 'capture_hook' --allow 'run' --allow 'launch_and_inject' --allow 'launch_capture' --allow 'install_iat_in_module' --threshold 30 --fail-above }
+Invoke-Step 'crap'        { cargo crap --lcov lcov.info --exclude 'src/main.rs' --exclude 'build.rs' --exclude 'xtask/**' --exclude 'crates/hook-test/**' --allow 'inject' --allow 'unhook' --allow 'capture_hook' --allow 'run' --allow 'launch_and_inject' --allow 'launch_capture' --allow 'install_iat_in_module' --allow 'hook_dll_path' --allow 'print_sample' --allow 'load_recorder' --allow 'unload_recorder' --allow 'call_mh_install' --allow 'swapchain_vtable_rva' --threshold 30 --fail-above }
 Invoke-Step 'duplication' { jscpd src --min-lines 5 --threshold 5 }
 
 Write-Host '== rustqual (advisory) ==' -ForegroundColor Cyan

@@ -80,6 +80,23 @@ Mechanism: own IAT + COM vtable-slot patching. No third-party hook library. Ever
 hook is **fail-open** and the injected code is **panic-free across the FFI
 boundary**.
 
+### Exclusive fullscreen
+
+A target that owns the display in **exclusive fullscreen** refuses any dummy
+device/swapchain creation (flip, bitblt, D3D9, composition) — those calls block
+and can crash it. So the recorder **skips** them there, and instead the **host**
+derives the shared DXGI swapchain vtable's RVA in `dxgi.dll` (from a dummy
+swapchain created in minihud's *own* process) and hands it to the recorder, which
+patches `dxgi_base + rva` — **no device creation in the target**. That captures
+`Present`/`Present1` in a fullscreen-exclusive game (verified live). Injected
+while windowed, the hooks also survive the transition into fullscreen.
+
+### Re-injection
+
+Re-injecting a target that already has a recorder **reuses** it (a second
+recorder on one ring would double-count); if the loaded recorder is an **older
+build**, it is **replaced in place** (unload + reload) — no target restart.
+
 ### Injection pipeline
 
 1. `OpenProcess`, refuse WOW64 targets (64-bit only), refuse known anti-cheat.
@@ -99,13 +116,15 @@ sets a slot's `seq` odd → payload → even; the reader accepts only a stable s
 and never returns a torn record. The host computes trailing fps/frametime from
 the QPC timestamps. See `crates/hook-ipc`.
 
-### Safety (tier 3, opt-in)
+### Safety (tier 3)
 
-An in-process present hook is **tier 3** — detectable. Therefore: **opt-in only**
-(nothing injects unless `--capture-hook`/`--launch`/`--follow` is passed), a
-**deny-list** of known anti-cheat modules is refused, and **no Stealth/evasion**
-techniques are implemented — hooks go at the ordinary vtable/IAT sites. Never
-inject a protected title. Details in [`HOOKING.md`](HOOKING.md) §4.
+An in-process present hook is **tier 3** — detectable. A **deny-list** of known
+anti-cheat modules is refused, and **no Stealth/evasion** techniques are
+implemented — hooks go at the ordinary vtable/IAT sites. Never inject a
+protected title. `minihud` **follows the foreground process by default** (the
+`--follow` lifecycle); pass **`--stats-only`** to run hardware stats without any
+capture, or `--capture-hook`/`--launch`/`--read-frames` for explicit one-shots.
+Details in [`HOOKING.md`](HOOKING.md) §4.
 
 ---
 
@@ -149,24 +168,54 @@ the recorder `hook_rt.dll`, and the Vulkan layer `hook_vk_layer.dll` +
 ### Hardware stats
 
 ```powershell
-target\debug\minihud.exe            # poll + print one line per interval; Ctrl+C to stop
+target\debug\minihud.exe --stats-only   # live status line (updates in place); Ctrl+C to stop
 ```
 
 ### Capture
 
+By default `minihud.exe` **follows the foreground process** and shows its
+**fps/frametime** beside the hardware stats on one self-updating line:
+
 ```powershell
-# 1) run a presenter (ships as the validation target `hook-test`), note its pid
-target\debug\hook-test.exe --api d3d11 --frames 2000
+# default: follow the foreground process + print hardware stats on one console
+target\debug\minihud.exe
 
-# 2a) launch + inject (recommended): starts the target suspended, injects, prints fps
-target\debug\minihud.exe --launch target\debug\hook-test.exe --api d3d11 --frames 600
+# bound the follow, or target a specific exe by name
+target\debug\minihud.exe --follow-secs 30
+target\debug\minihud.exe --match deadlock*.exe
 
-# 2b) or inject into an already-running pid, capture 5s
+# one-shot capture of an already-running pid (5s)
 target\debug\minihud.exe --capture-hook <pid> 5
 
-# 2c) or watch a target and manage the hook lifecycle automatically
-target\debug\minihud.exe --follow --match deadlock*.exe
+# launch a target suspended, inject before it makes its device, then run it
+target\debug\minihud.exe --launch target\debug\hook-test.exe --api d3d11 --frames 600
 ```
+
+The console keeps a **single self-updating status line** at the bottom — the
+hardware stats and, while capturing, the fps/tracking line — with every log
+event scrolling above it. Injection steps log verbosely (`DEBUG`):
+
+```text
+20:00:37 DEBUG inject: pid 23996; recorder staged at C:\Users\...\minihud\hook_rt-ad299d5ac9b0137a.dll
+20:00:37 DEBUG inject: OpenProcess ok
+20:00:37 DEBUG inject: recorder base 0x7ffe51cf0000; mh_install at 0x7ffe51cff4c0 (rva 0xf4c0)
+20:00:37  INFO launched and injected hook-test.exe (pid 23996) — installed hooks 9: dxgi.present, dxgi.present1, dxgi.resizebuffers, dxgi.setfullscreen, d3d9.createdevice, gl.wglswapbuffers, ...
+CPU 10% 79C 55W 4441MHz | RAM 15190/32692MB | GPU 37% 57C 81W 1725x7800MHz | VRAM 5115/8192MB [AMD Ryzen 7 5800X3D / NVIDIA GeForce RTX 3070]  |  pid 23996: 84.3 fps  11.87 ms  (dxgi.present x72)
+```
+(the bottom line updates in place; only events scroll. It is truncated to the
+console width so it never wraps.) Set `RUST_LOG` to change verbosity (default:
+`info,minihud::hook=debug`).
+
+Re-injecting a process that already has a recorder **reuses** it (a second
+recorder on one ring would double-count and confuse the status). A ring that
+stops advancing is shown as `no new frames (stale)` rather than a frozen fps.
+
+Injection **stages a content-addressed copy** of the recorder under
+`%LOCALAPPDATA%\minihud\` and loads *that*, so a hooked target never locks a
+file inside `target/`. `cargo build` / `cargo clean` keep working while a game
+is hooked; the copy is released when the target exits, and stale copies are
+pruned on the next injection. (`cargo xtask clean` also never fails on a file a
+running process holds — it reports it and continues.)
 
 Vulkan **implicit layer** (fully-dynamic apps), no injection — point the loader at
 the manifest dir (non-elevated testing only; production registration is a
@@ -177,30 +226,58 @@ $env:VK_ADD_IMPLICIT_LAYER_PATH = "target\debug"
 target\debug\hook-test.exe --api vulkan-dynamic --frames 2000
 # observe the ring the layer created, read-only, no elevation:
 $env:MINIHUD_NO_ELEVATE = "1"
-target\debug\minihud.exe --read-frames <pid> 4
+target\debug\minihud.exe --read-frames <pid|name> 4
 ```
 
 ## CLI reference
 
 ```text
-minihud                                            poll and print hardware stats
-minihud --capture-hook <pid> [secs]                inject the recorder into <pid> and print fps
-minihud --read-frames <pid> [secs]                 observe an existing frame ring (no injection)
-minihud --launch <exe> [args...]                   start <exe> suspended, inject, print fps
+minihud                                    follow a target + print hardware stats (default)
+minihud --stats-only                       print hardware stats only (no capture)
+minihud --capture-hook <pid|name> [secs]   inject the recorder into a running process
+minihud --read-frames <pid|name> [secs]    observe an existing frame ring (no injection)
+minihud --launch <exe> [args...]           start <exe> suspended, inject, then run it
 minihud --follow [--match <glob>] [--poll-ms <n>] [--follow-secs <n>]
-                                                   watch a target and manage the hook lifecycle
-minihud -h | --help                                print help
+minihud -h | --help                        print help
 
---match <glob>       with --follow, target an exe by case-insensitive glob (e.g. deadlock*.exe)
---poll-ms <n>        with --follow, poll interval in ms (default 1000)
---follow-secs <n>    with --follow, stop after <n> seconds (default: until Ctrl+C)
+<pid|name> is a numeric pid or a process image name (case-insensitive, `.exe`
+optional): `Overwatch`, `overwatch.exe`, or `1234` all work.
+
+Capture flags (each prints the hardware stats on the same console):
+--capture-hook <pid|name> [secs]  inject the recorder into an already-running process and
+                             print fps/frametime + tracking; [secs] = window
+                             (default: until Ctrl+C). Needs elevation.
+--launch <exe> [args...]     launch <exe> suspended, inject before it creates its device
+                             (so the D3D12 command queue is reachable), resume, then capture
+                             until it exits. Everything after <exe> goes to the child.
+                             Needs elevation.
+--launch-secs <n>            with --launch, capture for <n> seconds instead of until exit.
+                             Must precede --launch.
+--read-frames <pid|name> [secs]  open an existing frame ring read-only (no injection) and print
+                             fps; use it for a ring the Vulkan implicit layer created.
+                             No elevation. [secs] defaults to until Ctrl+C.
+--follow                     watch the foreground process and manage the hook lifecycle
+                             (detect -> inject -> retarget -> unhook). This is the DEFAULT,
+                             and it shows the hooked target's fps beside the hardware stats.
+                             Needs elevation; Ctrl+C to stop.
+--match <glob>               with --follow, target an exe by case-insensitive glob instead of
+                             the foreground process (e.g. deadlock*.exe).
+--poll-ms <n>                with --follow, how often to re-check the target (default 400).
+--follow-secs <n>            with --follow, stop after <n> seconds (default: until Ctrl+C).
+--interval-ms <n>            poll cadence in ms for the hardware stats and the fps line
+                             (default 400).
+--stats-only                 print hardware stats only; never capture.
+
+MINIHUD_HOOK_DLL=<name>      inject an alternate recorder DLL from the exe's directory
+                             (e.g. a fresh build while a live target holds the default name).
+MINIHUD_NO_ELEVATE=1         skip the UAC self-elevation (headless tests/diagnostics).
 ```
 
 The validation target `hook-test.exe` drives one real detour per presenter:
 
 ```text
 hook-test.exe --api <d3d11|d3d11-factory|d3d9|d3d9ex|d3d12|vulkan|vulkan-dynamic|
-                     opengl|opengl-delay|opengl-layer|angle|egl|dcomp> [--frames N] [--dynamic]
+                     opengl|opengl-delay|opengl-layer|angle|egl|dcomp> [--frames N] [--dynamic] [--fullscreen]
 ```
 
 ## Project layout

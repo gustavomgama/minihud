@@ -28,9 +28,11 @@ use core::ffi::c_void;
 /// Install the recorder and hooks. Returns the installed-API bitmask
 /// (`0` on failure). Called by the host as a remote thread entry point.
 #[no_mangle]
-pub extern "system" fn mh_install(_param: *mut c_void) -> u32 {
+pub extern "system" fn mh_install(param: *mut c_void) -> u32 {
     catch(|| {
-        let mask = install::install();
+        // `param` carries the host-supplied swapchain-vtable RVA in `dxgi.dll`
+        // (0 when the host had no swapchain to derive it from).
+        let mask = install::install(param as usize);
         if mask != 0 {
             install::start_rescan_thread();
         }

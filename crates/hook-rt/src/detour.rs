@@ -135,12 +135,22 @@ pub fn set_recorder(rec: Recorder) -> bool {
     RECORDER.set(Mutex::new(rec)).is_ok()
 }
 
+/// True when a recorder is already installed in this module.
+pub fn has_recorder() -> bool {
+    RECORDER.get().is_some()
+}
+
 /// Run `f` against the recorder if it is free; a contended lock drops the
 /// sample rather than blocking the present (fail-open).
+///
+/// A **poisoned** lock (a previous holder panicked) is recovered, not ignored:
+/// otherwise one panic would silently disable recording for the process life.
 pub fn with_recorder<F: FnOnce(&mut Recorder)>(f: F) {
     if let Some(m) = RECORDER.get() {
-        if let Ok(mut g) = m.try_lock() {
-            f(&mut g);
+        match m.try_lock() {
+            Ok(mut g) => f(&mut g),
+            Err(std::sync::TryLockError::Poisoned(e)) => f(&mut e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {}
         }
     }
 }
@@ -322,6 +332,59 @@ unsafe fn patch_slot(obj: *mut c_void, index: usize, api: Api, detour: usize) {
         let vtable = unsafe { crate::patch::vtable_of(obj) };
         register_vtable_original(vtable as usize, index, p.original());
         keep_patch(p);
+    }
+}
+
+/// Patch a vtable slot **by vtable address** (not via an object) and remember
+/// the original under `api`.
+///
+/// Used for the RVA-derived shared swapchain vtable: a fullscreen-exclusive
+/// target refuses a dummy swapchain, so the host derives the vtable's RVA in its
+/// own process and the recorder patches `module_base + rva` here.
+///
+/// # Safety
+/// `vtable` must be a live vtable and `index` a valid slot for it.
+pub unsafe fn patch_vtable(vtable: usize, index: usize, api: Api, detour: usize) {
+    // SAFETY: caller guarantees the vtable and index are valid.
+    if let Some(p) = unsafe { VtableSlotPatch::install_at(vtable as *mut usize, index, detour) } {
+        set_original(api, p.original());
+        register_vtable_original(vtable, index, p.original());
+        keep_patch(p);
+    }
+}
+
+/// Patch the shared DXGI swapchain vtable slots (`Present`, `SetFullscreenState`,
+/// `ResizeBuffers`, `Present1`) on the vtable at `vtable` (given by address).
+///
+/// # Safety
+/// `vtable` must be a live `IDXGISwapChain1`-or-later vtable (its slot 22 exists).
+pub unsafe fn patch_swapchain_vtable(vtable: usize) {
+    // SAFETY: caller guarantees `vtable` is a live swapchain vtable.
+    unsafe {
+        patch_vtable(
+            vtable,
+            8,
+            Api::DxgiPresent,
+            dxgi_present as *const () as usize,
+        );
+        patch_vtable(
+            vtable,
+            10,
+            Api::DxgiSetFullscreenState,
+            dxgi_setfullscreen as *const () as usize,
+        );
+        patch_vtable(
+            vtable,
+            13,
+            Api::DxgiResizeBuffers,
+            dxgi_resizebuffers as *const () as usize,
+        );
+        patch_vtable(
+            vtable,
+            22,
+            Api::DxgiPresent1,
+            dxgi_present1 as *const () as usize,
+        );
     }
 }
 

@@ -27,6 +27,14 @@ pub const RESCAN_BURST_PERIOD_MS: u64 = 50;
 /// How long after install the rescan stays on the fast burst cadence.
 pub const RESCAN_BURST_MS: u64 = 2000;
 
+/// How long after install the rescan keeps retrying the vtable bootstrap while
+/// no present hook is installed. A target that already owns the display can
+/// refuse the dummy device creation (`E_ACCESSDENIED`) — observed when injecting
+/// a game at launch — and the display settles within a second or two, so
+/// retrying there self-heals it instead of leaving the target permanently
+/// unhooked.
+pub const BOOTSTRAP_RETRY_MS: u64 = 15_000;
+
 /// IAT slots already patched, so a rescan does not double-hook.
 static PATCHED_SLOTS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
@@ -40,6 +48,20 @@ static UNINSTALLED: AtomicBool = AtomicBool::new(false);
 fn is_uninstalled() -> bool {
     UNINSTALLED.load(Ordering::Acquire)
 }
+
+/// Set by [`uninstall`] to tell the rescan thread to **exit** (not merely stop
+/// patching), so the host can `FreeLibrary` the module and load a fresh one.
+/// Cleared by [`install`]. This is what makes the recorder replaceable in place
+/// — no target restart.
+static STOP: AtomicBool = AtomicBool::new(false);
+
+/// True while a rescan thread is running, so [`start_rescan_thread`] spawns at
+/// most one and can respawn after the previous one exited.
+static RESCAN_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Sentinel published as `rescan_gen` when the rescan thread exits, so the host
+/// can wait for the thread to be gone before unloading the module.
+pub const RESCAN_STOPPED: u32 = 0xDEAD_BEEF;
 
 /// Serializes a rescan pass against [`uninstall`].
 ///
@@ -62,31 +84,42 @@ fn patch_lock() -> std::sync::MutexGuard<'static, ()> {
 
 /// Install the recorder and every hook. Returns the installed-API bitmask
 /// (0 when the recorder could not be created).
-pub fn install() -> u32 {
+///
+/// Re-runnable: a second call (or a call after [`uninstall`]) reuses the existing
+/// recorder and re-installs the hooks, so the host can re-inject a target that
+/// already has the recorder loaded without loading a second module.
+pub fn install(swapchain_rva: usize) -> u32 {
     UNINSTALLED.store(false, Ordering::Release);
-    let pid = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
-    let Ok(mapping) = FrameMapping::open_or_create(pid) else {
-        return 0;
-    };
-    let created = mapping.is_created();
-    // Leak the view: the recorder holds a `'static` slice for the process life.
-    let mapping = Box::leak(Box::new(mapping));
-    let ptr = mapping.as_mut_slice().as_mut_ptr();
-    let len = mapping.len();
-    // SAFETY: the leaked mapping is writable and outlives the process.
-    let rec = unsafe {
-        if created {
-            Recorder::create(ptr, len, qpc_frequency(), pid)
-        } else {
-            Recorder::attach(ptr, len)
+    STOP.store(false, Ordering::Release);
+    if !detour::has_recorder() {
+        let pid = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
+        let Ok(mapping) = FrameMapping::open_or_create(pid) else {
+            return 0;
+        };
+        let created = mapping.is_created();
+        // Leak the view: the recorder holds a `'static` slice for the process life.
+        let mapping = Box::leak(Box::new(mapping));
+        let ptr = mapping.as_mut_slice().as_mut_ptr();
+        let len = mapping.len();
+        // SAFETY: the leaked mapping is writable and outlives the process.
+        let rec = unsafe {
+            if created {
+                Recorder::create(ptr, len, qpc_frequency(), pid)
+            } else {
+                Recorder::attach(ptr, len)
+            }
+        };
+        let Some(rec) = rec else {
+            return 0;
+        };
+        if !detour::set_recorder(rec) {
+            return 0;
         }
-    };
-    let Some(rec) = rec else {
-        return 0;
-    };
-    if !detour::set_recorder(rec) {
-        return 0;
     }
+
+    // Patch the shared swapchain vtable by the host-supplied RVA — the
+    // fullscreen-exclusive path, where the target refuses a dummy swapchain.
+    patch_swapchain_vtable_rva(swapchain_rva);
 
     rescan_once();
     bootstrap_vtables();
@@ -104,6 +137,8 @@ pub fn uninstall() {
     // Set before restoring so a rescan that wakes mid-uninstall sees the flag
     // and does not re-patch what we are about to restore.
     UNINSTALLED.store(true, Ordering::Release);
+    // Tell the rescan thread to exit so the host may unload this module.
+    STOP.store(true, Ordering::Release);
     // Serialize with an in-flight rescan pass: hold the lock across the restore
     // so a pass that already passed the flag check either finishes first (and
     // its patches are restored here) or waits, then sees `UNINSTALLED`.
@@ -113,6 +148,9 @@ pub fn uninstall() {
     if let Ok(mut s) = PATCHED_SLOTS.lock() {
         s.clear();
     }
+    // Publish "nothing installed" so the host's status reflects the unhook
+    // instead of the stale mask from before it.
+    detour::with_recorder(|r| r.set_installed(0));
 }
 
 /// One rescan pass: hook the application's own import table. Returns the
@@ -241,13 +279,264 @@ unsafe fn install_iat_in_module(base: *mut u8) -> usize {
 
 /// Create dummy DXGI and D3D9 objects once to reach the shared vtables, patch
 /// them, then release the dummies. Best-effort and panic-guarded.
-fn bootstrap_vtables() {
-    let _ = std::panic::catch_unwind(bootstrap_dxgi);
-    let _ = std::panic::catch_unwind(bootstrap_d3d9);
+/// Patch the shared DXGI swapchain vtable reached by `rva` (relative to the
+/// target's `dxgi.dll` base).
+///
+/// The host derives the RVA from a dummy swapchain in its own process (where one
+/// is allowed) and passes it in; `dxgi.dll` and its vtable are identical on this
+/// machine, so the RVA matches even though the target — fullscreen-exclusive —
+/// refuses to create a swapchain itself. This is what reaches `Present` there.
+fn patch_swapchain_vtable_rva(rva: usize) -> bool {
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    if rva == 0 {
+        return false;
+    }
+    // SAFETY: querying a loaded module by name; no side effects.
+    let Ok(dxgi) = (unsafe { GetModuleHandleW(windows::core::w!("dxgi.dll")) }) else {
+        return false;
+    };
+    if dxgi.is_invalid() {
+        return false;
+    }
+    let vtable = dxgi.0 as usize + rva;
+    // SAFETY: the host validated this RVA as the swapchain vtable on the same
+    // dxgi.dll; its slots are the IDXGISwapChain present/resize/fullscreen set.
+    unsafe { detour::patch_swapchain_vtable(vtable) };
+    true
 }
 
-/// Create a minimal D3D11 swapchain and patch the shared DXGI swapchain vtable.
+fn bootstrap_vtables() {
+    // The factory vtable needs no display → always safe and non-invasive.
+    let _ = std::panic::catch_unwind(bootstrap_dxgi_factory);
+    if invasive_bootstrap_allowed(d3d_fullscreen()) && !skip_invasive_for_test() {
+        let _ = std::panic::catch_unwind(bootstrap_dxgi);
+        let _ = std::panic::catch_unwind(bootstrap_d3d9);
+    }
+}
+
+/// Whether the *invasive* dummy-device bootstraps may run.
+///
+/// They create a graphics device, which **blocks (~8 s) and crashes** a target
+/// that owns the display in **exclusive fullscreen** (verified against a live
+/// fullscreen-exclusive game), so they are skipped there. The factory hook still
+/// catches a swapchain recreation, and the rescan retry runs them once the
+/// target is windowed again.
+fn invasive_bootstrap_allowed(fullscreen: bool) -> bool {
+    !fullscreen
+}
+
+/// Test/diagnostic escape: `MINIHUD_SKIP_INVASIVE=1` makes the recorder skip the
+/// dummy-device bootstraps, so the RVA-derived swapchain-vtable patch can be
+/// verified in isolation.
+fn skip_invasive_for_test() -> bool {
+    std::env::var_os("MINIHUD_SKIP_INVASIVE").is_some()
+}
+
+/// True when a Direct3D application is running in exclusive fullscreen (the
+/// shell reports `QUNS_RUNNING_D3D_FULL_SCREEN`).
+fn d3d_fullscreen() -> bool {
+    use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_RUNNING_D3D_FULL_SCREEN};
+    // SAFETY: querying the shell notification state; takes no arguments.
+    matches!(
+        unsafe { SHQueryUserNotificationState() },
+        Ok(s) if s == QUNS_RUNNING_D3D_FULL_SCREEN
+    )
+}
+
+/// Patch the shared DXGI **factory** vtable by creating a dummy factory.
+///
+/// Creating a factory needs **no display**, so this works even when the target
+/// owns the display (fullscreen) and a dummy *swapchain* is refused
+/// (`E_ACCESSDENIED`). It hooks `CreateSwapChain*` on the (shared) factory
+/// vtable, so when the target (re)creates its swapchain — a fullscreen toggle,
+/// resolution change, or device-lost — the new swapchain's vtable is patched.
+/// Since the runtime's swapchain vtable is shared, that reaches the target's
+/// already-existing swapchain too.
+fn bootstrap_dxgi_factory() {
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory2, IDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS,
+    };
+    // SAFETY: creating a factory needs no display; the out-interface is valid.
+    let Ok(factory) =
+        (unsafe { CreateDXGIFactory2::<IDXGIFactory2>(DXGI_CREATE_FACTORY_FLAGS(0)) })
+    else {
+        return;
+    };
+    // SAFETY: `factory` is a live IDXGIFactory2*.
+    unsafe { detour::patch_factory(factory.as_raw()) };
+}
+
+/// Trivial window procedure for the bootstrap window: defer to the default.
+unsafe extern "system" fn bootstrap_wndproc(
+    hwnd: windows::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    // SAFETY: forwarding the window's own message unchanged.
+    unsafe { windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+/// A dedicated hidden popup window for the dummy swapchain, created once.
+///
+/// `GetDesktopWindow()` can be refused (`E_ACCESSDENIED`) by a target that
+/// already owns the display, which leaves DXGI capture entirely absent. A window
+/// owned by this process is the reliable swapchain target (the same approach
+/// `hook-test` uses). Returns `None` if the window could not be created, so the
+/// caller can fall back.
+fn bootstrap_window() -> Option<windows::Win32::Foundation::HWND> {
+    use windows::Win32::Foundation::{HINSTANCE, HWND};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, RegisterClassW, CW_USEDEFAULT, WNDCLASSW, WS_POPUP,
+    };
+
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    static mut HWND_SLOT: isize = 0;
+
+    ONCE.call_once(|| {
+        let Ok(instance) = (unsafe { GetModuleHandleW(None) }) else {
+            return;
+        };
+        let class = windows::core::w!("minihud_bootstrap");
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(bootstrap_wndproc),
+            hInstance: HINSTANCE(instance.0),
+            lpszClassName: class,
+            ..Default::default()
+        };
+        // SAFETY: `wc` is a fully initialized class description.
+        if unsafe { RegisterClassW(&wc) } == 0 {
+            return;
+        }
+        // SAFETY: the class is registered; a hidden 8x8 popup is a valid target.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                Default::default(),
+                class,
+                windows::core::w!("minihud bootstrap"),
+                WS_POPUP,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                8,
+                8,
+                None,
+                None,
+                Some(HINSTANCE(instance.0)),
+                None,
+            )
+        };
+        if let Ok(h) = hwnd {
+            // SAFETY: written once, under `Once`.
+            unsafe { HWND_SLOT = h.0 as isize };
+        }
+    });
+
+    // SAFETY: written once under `Once` before any read here.
+    let v = unsafe { HWND_SLOT };
+    if v != 0 {
+        Some(HWND(v as *mut core::ffi::c_void))
+    } else {
+        None
+    }
+}
+
+/// Create a dummy DXGI swapchain and patch the shared swapchain vtable.
+///
+/// Tries a **flip-model** swapchain first — the path real overlays use, and the
+/// one a display-owning (fullscreen) target accepts — then falls back to the
+/// legacy bitblt `D3D11CreateDeviceAndSwapChain`. Never needs a target restart.
 fn bootstrap_dxgi() {
+    use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
+    let hwnd = bootstrap_window().unwrap_or_else(|| unsafe { GetDesktopWindow() });
+    if let Err(flip_code) = bootstrap_dxgi_flip(hwnd) {
+        // Flip-model failed; try the legacy bitblt path, then re-record the flip
+        // reason **last** so the host sees why the modern path failed instead of
+        // the bitblt HRESULT masking it.
+        bootstrap_dxgi_bitblt(hwnd);
+        detour::with_recorder(|r| r.note_error(flip_code));
+    }
+}
+
+/// Flip-model dummy swapchain via `IDXGIFactory2::CreateSwapChainForHwnd`.
+///
+/// Returns `Err(marker)` naming the failing step so a bootstrap failure is
+/// diagnosable (`0x7F01` device, `0x7F02` IDXGIDevice, `0x7F03` adapter,
+/// `0x7F04` factory, `0x7F05xxxx` CreateSwapChainForHwnd with the HRESULT low
+/// bits).
+fn bootstrap_dxgi_flip(hwnd: windows::Win32::Foundation::HWND) -> Result<(), i32> {
+    use windows::Win32::Foundation::{HMODULE, TRUE};
+    use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_FLAG,
+    };
+    use windows::Win32::Graphics::Dxgi::Common::{
+        DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC,
+    };
+    use windows::Win32::Graphics::Dxgi::{
+        IDXGIDevice, IDXGIFactory2, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
+        DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    };
+
+    let levels = [D3D_FEATURE_LEVEL_11_0];
+    let mut device: Option<ID3D11Device> = None;
+    // SAFETY: standard device creation; the out-pointer is valid.
+    let created = unsafe {
+        D3D11CreateDevice(
+            None::<&windows::Win32::Graphics::Dxgi::IDXGIAdapter>,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_FLAG(0),
+            Some(&levels),
+            7,
+            Some(&mut device),
+            None,
+            None,
+        )
+    };
+    let Some(device) = device.filter(|_| created.is_ok()) else {
+        return Err(0x7F01);
+    };
+
+    // device -> IDXGIDevice -> adapter -> IDXGIFactory2.
+    let dxgi_dev = device.cast::<IDXGIDevice>().map_err(|_| 0x7F02)?;
+    let adapter = (unsafe { dxgi_dev.GetAdapter() }).map_err(|_| 0x7F03)?;
+    let factory = (unsafe { adapter.GetParent::<IDXGIFactory2>() }).map_err(|_| 0x7F04)?;
+
+    let desc = DXGI_SWAP_CHAIN_DESC1 {
+        Width: 8,
+        Height: 8,
+        Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+        Stereo: TRUE,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+        BufferCount: 2,
+        Scaling: DXGI_SCALING_STRETCH,
+        SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+        AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+        Flags: 0,
+    };
+    // SAFETY: live device/window; `desc` is a fully initialized DESC1.
+    let made = unsafe {
+        factory.CreateSwapChainForHwnd(
+            &device,
+            hwnd,
+            &desc,
+            None::<*const windows::Win32::Graphics::Dxgi::DXGI_SWAP_CHAIN_FULLSCREEN_DESC>,
+            None::<&windows::Win32::Graphics::Dxgi::IDXGIOutput>,
+        )
+    };
+    let sc = made.map_err(|e| 0x7F05_0000 | (e.code().0 & 0xFFFF))?;
+    // SAFETY: `sc` is a live IDXGISwapChain1*.
+    unsafe { detour::patch_swapchain(sc.as_raw()) };
+    Ok(())
+}
+
+/// Legacy bitblt dummy swapchain (`D3D11CreateDeviceAndSwapChain`).
+fn bootstrap_dxgi_bitblt(hwnd: windows::Win32::Foundation::HWND) {
     use windows::Win32::Foundation::{HMODULE, TRUE};
     use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
     use windows::Win32::Graphics::Direct3D11::{
@@ -261,7 +550,6 @@ fn bootstrap_dxgi() {
         IDXGIAdapter, IDXGISwapChain, DXGI_SWAP_CHAIN_DESC, DXGI_SWAP_EFFECT_DISCARD,
         DXGI_USAGE_RENDER_TARGET_OUTPUT,
     };
-    use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
 
     let desc = DXGI_SWAP_CHAIN_DESC {
         BufferDesc: DXGI_MODE_DESC {
@@ -281,7 +569,7 @@ fn bootstrap_dxgi() {
         },
         BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
         BufferCount: 1,
-        OutputWindow: unsafe { GetDesktopWindow() },
+        OutputWindow: hwnd,
         Windowed: TRUE,
         SwapEffect: DXGI_SWAP_EFFECT_DISCARD,
         Flags: 0,
@@ -309,7 +597,16 @@ fn bootstrap_dxgi() {
         if let Some(sc) = &swapchain {
             // SAFETY: `sc` is a live IDXGISwapChain*.
             unsafe { detour::patch_swapchain(sc.as_raw()) };
+        } else {
+            // Success HRESULT but no swapchain out-pointer: record a marker so
+            // the host can tell this apart from a hard creation failure.
+            detour::with_recorder(|r| r.note_error(0x7001));
         }
+    } else {
+        // Record the HRESULT: a target that already owns the GPU/DXGI state can
+        // refuse the dummy device+swapchain, which leaves DXGI capture absent.
+        let code = ok.as_ref().err().map(|e| e.code().0).unwrap_or(-1);
+        detour::with_recorder(|r| r.note_error(code));
     }
     drop((swapchain, device, context));
 }
@@ -391,6 +688,22 @@ fn installed_mask() -> u32 {
     mask
 }
 
+/// True when at least one frame-producing (present/swap) hook is installed.
+///
+/// The bootstrap retry stops as soon as this is true — a dummy device creation
+/// that succeeded patched the shared vtable, so the target can be recorded.
+fn any_present_hook() -> bool {
+    [
+        Api::DxgiPresent,
+        Api::DxgiPresent1,
+        Api::D3d9Present,
+        Api::WglSwapBuffers,
+        Api::VkQueuePresentKHR,
+    ]
+    .iter()
+    .any(|a| detour::original(*a) != 0)
+}
+
 /// Base address of this module, so the rescan never hooks the recorder itself.
 fn own_module_base() -> *mut u8 {
     use windows::Win32::Foundation::HMODULE;
@@ -416,35 +729,80 @@ fn own_module_base() -> *mut u8 {
 /// `__delayLoadHelper2` overwrites them), then the steady [`RESCAN_PERIOD_MS`]
 /// (to pick up late-loaded modules). Idempotent: only the first call spawns.
 pub fn start_rescan_thread() {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        std::thread::spawn(|| {
-            let start = Instant::now();
-            let mut generation: u32 = 0;
-            loop {
-                std::thread::sleep(rescan_interval(start.elapsed()));
-                generation = generation.wrapping_add(1);
-                let found = rescan_once();
-                detour::with_recorder(|r| {
-                    r.note_rescan(generation);
-                    if found == 0 {
-                        r.note_call();
-                    }
-                });
+    if RESCAN_RUNNING.swap(true, Ordering::AcqRel) {
+        return; // a rescan thread is already running
+    }
+    std::thread::spawn(|| {
+        let start = Instant::now();
+        let mut generation: u32 = 0;
+        while !STOP.load(Ordering::Acquire) {
+            std::thread::sleep(rescan_interval(start.elapsed()));
+            if STOP.load(Ordering::Acquire) {
+                break;
             }
-        });
+            generation = generation.wrapping_add(1);
+            rescan_once();
+            // Retry the vtable bootstrap while nothing present-producing is in
+            // and the retry window is open: a launch-time `E_ACCESSDENIED` from
+            // the dummy device creation self-heals once the display settles.
+            if !is_uninstalled()
+                && start.elapsed() < Duration::from_millis(BOOTSTRAP_RETRY_MS)
+                && !any_present_hook()
+            {
+                bootstrap_vtables();
+            }
+            detour::with_recorder(|r| {
+                r.note_rescan(generation);
+                // Republish the mask so a successful retry is visible to the
+                // host (the installed set can grow after `install`).
+                r.set_installed(installed_mask());
+            });
+        }
+        // The thread is gone: signal the host so it can unload this module.
+        detour::with_recorder(|r| r.note_rescan(RESCAN_STOPPED));
+        RESCAN_RUNNING.store(false, Ordering::Release);
     });
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn invasive_bootstraps_are_skipped_in_fullscreen() {
+        // Catches: running the dummy-device bootstraps while a target owns the
+        // display in exclusive fullscreen — they block ~8 s and crash the target
+        // (verified live). The factory bootstrap (no device) still runs.
+        assert!(
+            !super::invasive_bootstrap_allowed(true),
+            "invasive bootstraps must be skipped in exclusive fullscreen"
+        );
+        assert!(
+            super::invasive_bootstrap_allowed(false),
+            "invasive bootstraps run when the target does not own the display"
+        );
+    }
+
     /// The installer must not crash the host process, even without a GPU.
     /// It is intentionally not asserting a mask (headless CI may have none).
     #[test]
     fn install_and_uninstall_smoke() {
-        let _mask = super::install();
+        let _mask = super::install(0);
         super::uninstall();
+    }
+
+    /// Live GPU probe: does `bootstrap_dxgi` actually reach the shared swapchain
+    /// vtable in a normal process? (Not a gate — needs a GPU.)
+    #[test]
+    #[ignore = "live GPU probe; run with --ignored --nocapture"]
+    fn probe_bootstrap_dxgi_reaches_the_swapchain_vtable() {
+        use hook_ipc::Api;
+        let before = crate::detour::original(Api::DxgiPresent);
+        super::bootstrap_dxgi();
+        let after = crate::detour::original(Api::DxgiPresent);
+        eprintln!("bootstrap_dxgi: DxgiPresent original before={before:#x} after={after:#x}");
+        assert_ne!(
+            after, 0,
+            "bootstrap_dxgi must patch the DXGI swapchain vtable"
+        );
     }
 
     #[test]

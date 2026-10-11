@@ -112,6 +112,31 @@ impl VtableSlotPatch {
         self.original
     }
 
+    /// Replace slot `index` of the vtable **given directly** (not via an object)
+    /// with `replacement`.
+    ///
+    /// Used to patch a shared COM vtable reached by its RVA in the owning module
+    /// when the object itself cannot be created — a fullscreen-exclusive target
+    /// refuses a dummy swapchain, so the host derives the swapchain vtable's RVA
+    /// from its own process and the recorder patches `module_base + rva` here.
+    ///
+    /// # Safety
+    /// `vtable` must be a live vtable (an array of function pointers) at least
+    /// `index + 1` long.
+    pub unsafe fn install_at(vtable: *mut usize, index: usize, replacement: usize) -> Option<Self> {
+        if vtable.is_null() {
+            return None;
+        }
+        // SAFETY: `vtable` is a live vtable per the caller's contract.
+        let slot = vtable.add(index);
+        // SAFETY: `slot` is a valid slot per the caller's contract.
+        if unsafe { *slot } == replacement {
+            return None;
+        }
+        let original = swap_usize(slot, replacement)?;
+        Some(Self { slot, original })
+    }
+
     /// Restore the original pointer. Idempotent.
     ///
     /// # Safety
@@ -154,6 +179,27 @@ mod tests {
         let old = unsafe { swap_usize(cells.as_mut_ptr(), 99) }.expect("writable");
         assert_eq!(old, 11);
         assert_eq!(cells[0], 99);
+    }
+
+    #[test]
+    fn install_at_patches_a_bare_vtable_and_restores() {
+        // Catches: the RVA path (`install_at`) — used to hook a
+        // fullscreen-exclusive target's shared swapchain vtable by address, where
+        // no object exists to derive the vtable from — computing the wrong slot,
+        // touching a neighbour, losing the original, or dereferencing null.
+        let mut vtable = [0x1111usize, 0x2222usize, 0x3333usize];
+        // SAFETY: `vtable` is a live, owned array of function pointers.
+        let mut p = unsafe { VtableSlotPatch::install_at(vtable.as_mut_ptr(), 1, 0xDEAD) }
+            .expect("writable");
+        assert_eq!(vtable[1], 0xDEAD, "slot 1 patched");
+        assert_eq!(vtable[0], 0x1111, "neighbouring slots untouched");
+        assert_eq!(vtable[2], 0x3333, "neighbouring slots untouched");
+        assert_eq!(p.original(), 0x2222, "the original is remembered");
+        // SAFETY: `vtable` is still live.
+        unsafe { p.restore() };
+        assert_eq!(vtable[1], 0x2222, "restored");
+        // SAFETY: a null vtable is explicitly handled, not dereferenced.
+        assert!(unsafe { VtableSlotPatch::install_at(core::ptr::null_mut(), 1, 0xDEAD) }.is_none());
     }
 
     #[test]

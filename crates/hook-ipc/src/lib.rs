@@ -17,9 +17,9 @@ pub mod map;
 pub use map::{mapping_name, FrameMapping};
 
 pub use layout::{
-    slot_offset, Api, FrameRecord, Header, FLAG_ACQUISITION, FLAG_HAS_SWAPCHAIN, FLAG_PRESENT,
-    FLAG_PRESENT_FAILED, HEADER_SIZE, MAGIC, RING_CAPACITY, RING_OFFSET, SLOT_SIZE, STATUS_SIZE,
-    TOTAL_SIZE, WIRE_VERSION,
+    installed_labels, slot_offset, Api, FrameRecord, Header, Status, ALL_APIS, FLAG_ACQUISITION,
+    FLAG_HAS_SWAPCHAIN, FLAG_PRESENT, FLAG_PRESENT_FAILED, HEADER_SIZE, MAGIC, RING_CAPACITY,
+    RING_OFFSET, SLOT_SIZE, STATUS_SIZE, TOTAL_SIZE, WIRE_VERSION,
 };
 pub use metrics::{trailing, Trailing};
 pub use ring::{IpcError, RingReader, RingWriter};

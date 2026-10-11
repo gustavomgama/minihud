@@ -31,7 +31,7 @@ fn pick(
 /// Fill stats from an LHM sample. Each group is applied by its own helper;
 /// a missing sensor leaves its field untouched (which prints as `--`).
 pub fn apply(sensors: &[LhmSensor], stats: &mut HwStats) {
-    tracing::debug!("lhm apply: {} sensors", sensors.len());
+    tracing::trace!("lhm apply: {} sensors", sensors.len());
     apply_cpu(sensors, stats);
     apply_ram(sensors, stats);
     apply_names(sensors, stats);

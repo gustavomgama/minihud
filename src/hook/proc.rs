@@ -122,6 +122,46 @@ fn exe_name(e: &PROCESSENTRY32W) -> String {
     String::from_utf16_lossy(&e.szExeFile[..len])
 }
 
+/// `s` (already lower-cased) without a trailing `.exe`.
+fn strip_exe(s: &str) -> &str {
+    s.strip_suffix(".exe").unwrap_or(s)
+}
+
+/// True when a process image name matches a CLI target, case-insensitively and
+/// tolerating a missing `.exe` on either side (`Overwatch` matches
+/// `Overwatch.exe`).
+pub fn name_matches(process: &str, target: &str) -> bool {
+    let p = process.to_ascii_lowercase();
+    let t = target.to_ascii_lowercase();
+    p == t || strip_exe(&p) == strip_exe(&t)
+}
+
+/// Resolve a CLI target — a numeric pid or a process image name — to a pid.
+///
+/// A numeric target is always taken as a pid. Otherwise the name is matched
+/// case-insensitively, preferring an exact image name over a `.exe`-stripped
+/// one (`Overwatch.exe` over `Overwatch`).
+pub fn resolve_pid(target: &str, processes: &[(u32, String)]) -> Option<u32> {
+    if let Ok(pid) = target.parse::<u32>() {
+        return Some(pid);
+    }
+    let t = target.to_ascii_lowercase();
+    processes
+        .iter()
+        .find(|(_, name)| name.to_ascii_lowercase() == t)
+        .or_else(|| {
+            processes
+                .iter()
+                .find(|(_, name)| name_matches(name, target))
+        })
+        .map(|(pid, _)| *pid)
+}
+
+/// Resolve a CLI target (pid or process name) against the live process list.
+pub fn find_pid(target: &str) -> Option<u32> {
+    resolve_pid(target, &list_processes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +212,34 @@ mod tests {
             !process_alive(0xFFFF_FFFE),
             "a pid that cannot exist must read as dead"
         );
+    }
+
+    #[test]
+    fn name_matches_is_case_insensitive_and_optional_exe() {
+        // Catches: a name match that requires the exact `.exe` spelling, so
+        // `--capture-hook overwatch` never resolves.
+        assert!(name_matches("Overwatch.exe", "overwatch"));
+        assert!(name_matches("Overwatch.exe", "Overwatch.EXE"));
+        assert!(name_matches("Overwatch", "overwatch.exe"));
+        assert!(!name_matches("Overwatch.exe", "overwatch2"));
+        assert!(!name_matches("game.dll", "game"));
+    }
+
+    #[test]
+    fn resolve_pid_prefers_a_pid_then_exact_then_stripped_name() {
+        // Catches: treating a numeric name as a name, or picking a stripped
+        // near-match over the exact image name.
+        let procs = vec![
+            (10u32, "game-client.exe".to_string()),
+            (20, "game.exe".to_string()),
+            (30, "Other.exe".to_string()),
+        ];
+        assert_eq!(resolve_pid("1234", &procs), Some(1234));
+        assert_eq!(resolve_pid("game.exe", &procs), Some(20));
+        assert_eq!(resolve_pid("GAME.EXE", &procs), Some(20));
+        assert_eq!(resolve_pid("game", &procs), Some(20));
+        assert_eq!(resolve_pid("game-client", &procs), Some(10));
+        assert_eq!(resolve_pid("Other", &procs), Some(30));
+        assert_eq!(resolve_pid("nope", &procs), None);
     }
 }

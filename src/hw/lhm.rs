@@ -160,7 +160,7 @@ fn tick(
 fn store_sample(line: &str, slot: &LhmLatest) {
     match serde_json::from_str::<Vec<LhmSensor>>(line) {
         Ok(sensors) => {
-            tracing::debug!("lhm sensors: count={}", sensors.len());
+            tracing::trace!("lhm sensors: count={}", sensors.len());
             if let Ok(mut g) = slot.lock() {
                 *g = Some((Instant::now(), sensors));
             }

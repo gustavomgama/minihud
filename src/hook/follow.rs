@@ -9,14 +9,10 @@
 //! [`parse_follow`]) is pure and unit-tested; the watch loop ([`run`]) is I/O
 //! and is exercised by running it against a real target.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use windows::core::BOOL;
-use windows::Win32::System::Console::SetConsoleCtrlHandler;
-
-/// Default poll interval for `--follow`.
-pub const DEFAULT_POLL_MS: u64 = 500;
+/// Default poll interval for `--follow` (ms).
+pub const DEFAULT_POLL_MS: u64 = 400;
 
 /// Parsed `--follow [--match <glob>] [--poll-ms <n>] [--follow-secs <n>]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,23 +23,44 @@ pub struct FollowArgs {
     pub secs: Option<u64>,
 }
 
+impl Default for FollowArgs {
+    /// The `--follow`-as-default arguments: follow the foreground process on the
+    /// default cadence until Ctrl+C, with no name filter.
+    fn default() -> Self {
+        Self {
+            match_glob: None,
+            poll_ms: DEFAULT_POLL_MS,
+            secs: None,
+        }
+    }
+}
+
 /// Parse `--follow [--match <glob>] [--poll-ms <n>] [--follow-secs <n>]` from
 /// the process arguments.
 ///
-/// Returns `None` when `--follow` is absent. A `--match`/`--poll-ms`/
-/// `--follow-secs` without a value (or an unparseable numeric one) yields
-/// `None`, so the caller falls back rather than guessing.
+/// Returns `None` only when no follow flag is present at all. Any of
+/// `--follow`/`--match`/`--poll-ms`/`--follow-secs` selects follow mode (it is
+/// the default), so `--follow-secs 5` alone bounds the default run. A
+/// `--match`/`--poll-ms`/`--follow-secs` without a value (or an unparseable
+/// numeric one) yields `None`, so the caller falls back rather than guessing.
 pub fn parse_follow(args: &[String]) -> Option<FollowArgs> {
-    let i = args.iter().position(|a| a == "--follow")?;
+    let present = args.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "--follow" | "--match" | "--poll-ms" | "--follow-secs"
+        )
+    });
+    if !present {
+        return None;
+    }
     let mut match_glob = None;
     let mut poll_ms = DEFAULT_POLL_MS;
     let mut secs = None;
-    let mut it = args[i + 1..].iter();
-    while let Some(a) = it.next() {
+    for (i, a) in args.iter().enumerate() {
         match a.as_str() {
-            "--match" => match_glob = Some(it.next()?.clone()),
-            "--poll-ms" => poll_ms = it.next()?.parse().ok()?,
-            "--follow-secs" => secs = Some(it.next()?.parse().ok()?),
+            "--match" => match_glob = Some(args.get(i + 1)?.clone()),
+            "--poll-ms" => poll_ms = args.get(i + 1)?.parse().ok()?,
+            "--follow-secs" => secs = Some(args.get(i + 1)?.parse().ok()?),
             _ => {}
         }
     }
@@ -61,10 +78,16 @@ fn basename(path: &str) -> &str {
 
 /// True when `exe_basename` (a path or bare name) matches `glob`,
 /// case-insensitively, with `*` (any run) and `?` (one char) wildcards.
+///
+/// A `.exe` on the process name is optional in the pattern, so `--match
+/// overwatch` matches `Overwatch.exe` — consistent with the `--capture-hook`
+/// target resolver.
 pub fn matches(exe_basename: &str, glob: &str) -> bool {
     let name = basename(exe_basename).to_ascii_lowercase();
     let pattern = glob.to_ascii_lowercase();
+    let stem = name.strip_suffix(".exe").unwrap_or(&name);
     glob_match(name.as_bytes(), pattern.as_bytes())
+        || glob_match(stem.as_bytes(), pattern.as_bytes())
 }
 
 /// Byte-wise wildcard match with `*` and `?` (no backslash escaping).
@@ -182,31 +205,13 @@ fn next_action(desired: Option<(u32, String)>, current: Option<(u32, String)>) -
     }
 }
 
-/// Cleared by the console handler so the loop exits on Ctrl+C / window close.
-static RUNNING: AtomicBool = AtomicBool::new(true);
-
-/// Console control handler: ask the loop to stop. Returns TRUE (handled).
-unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> BOOL {
-    RUNNING.store(false, Ordering::SeqCst);
-    BOOL(1)
-}
-
-/// Register [`ctrl_handler`]; failure is ignored (the loop still runs and the
-/// guard still unhooks on its normal exit path).
-fn install_ctrl_handler() {
-    // SAFETY: registering a process-global handler with a valid signature.
-    match unsafe { SetConsoleCtrlHandler(Some(ctrl_handler), true) } {
-        Ok(()) => {}
-        Err(e) => log(&format!(
-            "note: Ctrl+C handler unavailable ({e}); the Drop guard still unhooks on exit"
-        )),
-    }
-}
-
 /// The currently hooked target.
 struct Hooked {
     pid: u32,
     exe: String,
+    /// True when *we* injected the recorder; false when it was already loaded and
+    /// we are only observing it. A recorder we did not install is left alone.
+    fresh: bool,
 }
 
 /// Owns the currently hooked target and unhooks it on drop, so no exit path
@@ -241,6 +246,14 @@ impl FollowGuard {
     /// Unhook the current target, returning the lifecycle log line, if any.
     fn unhook_current(&mut self) -> Option<String> {
         let h = self.current.take()?;
+        if !h.fresh {
+            // A recorder we did not install (a pre-existing injection) is left
+            // alone — unhooking it would break another session's capture.
+            return Some(format!(
+                "left recorder in {} (pid {}) (not ours to unhook)",
+                h.exe, h.pid
+            ));
+        }
         Some(release_target(
             &h.exe,
             h.pid,
@@ -257,9 +270,8 @@ impl Drop for FollowGuard {
     }
 }
 
-/// Lifecycle log line: stdout (for the operator) plus `tracing`.
+/// Lifecycle log line (routed to the console by the tracing writer).
 fn log(msg: &str) {
-    println!("minihud: follow: {msg}");
     tracing::info!("follow: {msg}");
 }
 
@@ -281,13 +293,17 @@ fn try_inject(
     exe: String,
 ) {
     log_once(last_status, format!("target={exe} (pid {pid}); injecting"));
+    let fresh = super::find_loaded_recorder(pid).is_none();
     match super::inject(pid) {
         Ok(mask) => {
             log_once(
                 last_status,
-                format!("injected (mask {mask:#x}) into {exe} (pid {pid})"),
+                format!(
+                    "injected into {exe} (pid {pid}) — installed hooks {} (mask {mask:#x})",
+                    super::describe_installed(mask)
+                ),
             );
-            guard.current = Some(Hooked { pid, exe });
+            guard.current = Some(Hooked { pid, exe, fresh });
             *refused = None;
         }
         Err(e) => {
@@ -319,13 +335,13 @@ fn follow_deadline(now: std::time::Instant, secs: Option<u64>) -> Option<std::ti
 /// Stops on Ctrl+C, or after `secs` seconds when that is `Some` (a bounded
 /// follow, which a non-interactive caller can drive to completion). Each
 /// `poll_ms` tick it resolves the current target (foreground + optional glob),
-/// then injects it if it changed and unhooks the previous one. It logs
-/// lifecycle events only and never reads frame data.
+/// then injects it if it changed and unhooks the previous one. It logs lifecycle
+/// events and shows the hooked target's fps/frametime on the status line
+/// (read-only) beside the hardware stats.
 pub fn run(match_glob: Option<String>, poll_ms: u64, secs: Option<u64>) -> Result<(), String> {
     let poll = poll_delay(poll_ms);
     let own = std::process::id();
-    install_ctrl_handler();
-    RUNNING.store(true, Ordering::SeqCst);
+    super::install_ctrl_handler();
 
     let glob_desc = match_glob.as_deref().unwrap_or("<foreground>");
     let bound = secs.map(|s| format!(", secs={s}")).unwrap_or_default();
@@ -339,8 +355,12 @@ pub fn run(match_glob: Option<String>, poll_ms: u64, secs: Option<u64>) -> Resul
     let mut guard = FollowGuard { current: None };
     let mut last_status: Option<String> = None;
     let mut refused: Option<u32> = None;
+    // Fps/frametime display for the currently-hooked target (updated each tick).
+    let mut fps_reader: Option<super::FrameReader> = None;
+    let mut fps_pid: u32 = 0;
+    let mut last_seq: Option<u64> = None;
 
-    while RUNNING.load(Ordering::SeqCst) && deadline.is_none_or(|d| std::time::Instant::now() < d) {
+    while super::should_run() && deadline.is_none_or(|d| std::time::Instant::now() < d) {
         let foreground = super::proc::foreground_pid()
             .and_then(|pid| super::proc::process_name(pid).map(|name| (pid, name)));
         let processes = super::proc::list_processes();
@@ -391,10 +411,33 @@ pub fn run(match_glob: Option<String>, poll_ms: u64, secs: Option<u64>) -> Resul
             }
         }
 
+        // Keep the status line's fps segment current for the hooked target, so
+        // the default `minihud` run shows fps/frametime beside the hardware
+        // stats. (This is the one place follow touches the ring — read-only.)
+        match guard.current.as_ref() {
+            Some(h) => {
+                if fps_pid != h.pid {
+                    fps_reader = super::FrameReader::open(h.pid).ok();
+                    fps_pid = h.pid;
+                    last_seq = None;
+                }
+                if let Some(r) = &fps_reader {
+                    super::print_sample(h.pid, r, &mut last_seq);
+                }
+            }
+            None => {
+                if fps_reader.is_some() {
+                    fps_reader = None;
+                    fps_pid = 0;
+                    crate::console::status_capture("");
+                }
+            }
+        }
+
         std::thread::sleep(poll);
     }
 
-    let reason = if RUNNING.load(Ordering::SeqCst) {
+    let reason = if super::should_run() {
         "follow-secs elapsed"
     } else {
         "interrupt"
@@ -415,10 +458,53 @@ mod tests {
     }
 
     #[test]
+    fn follow_default_follows_the_foreground_on_the_default_cadence() {
+        // Catches: a `Default` that polls at 0 ms (busy-spin) or picks a name
+        // filter, when `--follow` is the default mode with no arguments.
+        let d = FollowArgs::default();
+        assert_eq!(d.match_glob, None);
+        assert_eq!(d.poll_ms, DEFAULT_POLL_MS);
+        assert_eq!(d.secs, None);
+    }
+
+    #[test]
+    fn follow_flags_select_follow_without_the_explicit_flag() {
+        // Catches: `--follow-secs`/`--match`/`--poll-ms` being ignored when
+        // `--follow` is the default (the bound or name filter would silently do
+        // nothing), while a non-follow command still yields `None`.
+        assert_eq!(
+            parse_follow(&args(&["--follow-secs", "5"])).map(|f| f.secs),
+            Some(Some(5))
+        );
+        assert_eq!(
+            parse_follow(&args(&["--match", "game.exe"])).map(|f| f.match_glob),
+            Some(Some("game.exe".to_string()))
+        );
+        assert_eq!(
+            parse_follow(&args(&["--poll-ms", "100"])).map(|f| f.poll_ms),
+            Some(100)
+        );
+        assert_eq!(parse_follow(&args(&["--capture-hook", "1"])), None);
+        assert_eq!(parse_follow(&args(&[])), None);
+    }
+
+    #[test]
     fn glob_matches_literal_names_case_insensitively() {
         assert!(matches("game.exe", "game.exe"));
         assert!(matches("Game.EXE", "game.exe"));
         assert!(!matches("game.dll", "game.exe"));
+    }
+
+    #[test]
+    fn glob_tolerates_a_missing_exe_on_the_process_name() {
+        // Catches: `--match overwatch` never matching `Overwatch.exe` (the follow
+        // would silently never inject) while a genuinely different name still
+        // fails.
+        assert!(matches("Overwatch.exe", "overwatch"));
+        assert!(matches("Overwatch.exe", "OVERWATCH"));
+        assert!(matches("Overwatch.exe", "overwatch*"));
+        assert!(!matches("Overwatch2.exe", "overwatch"));
+        assert!(!matches("game.dll", "game"));
     }
 
     #[test]

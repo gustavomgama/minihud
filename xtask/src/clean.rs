@@ -1,8 +1,9 @@
 //! Recursive `clean` for the xtask build helper.
 //!
-//! On Windows `cargo clean` cannot delete the currently running `xtask.exe`,
-//! so the fallback removes `target/` and `dist/` by hand, recording (not
-//! failing on) the one file it cannot — the running image.
+//! On Windows `cargo clean` cannot delete files a running process holds open —
+//! the currently running `xtask.exe`, and any target that still has the recorder
+//! DLL loaded. `clean` removes what it can and **reports** the rest instead of
+//! failing, so a locked file never blocks a build.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,7 +15,7 @@ pub fn clean() -> Result<(), String> {
     let me = std::env::current_exe().ok();
 
     // Primary path: `cargo clean`. A failure here is expected on Windows when
-    // the running xtask holds a file — finish by hand.
+    // the running xtask (or a hooked target) holds a file — finish by hand.
     let out = cargo()
         .current_dir(root())
         .arg("clean")
@@ -31,21 +32,35 @@ pub fn clean() -> Result<(), String> {
     let mut skipped: Vec<PathBuf> = Vec::new();
     remove_tree(&target_dir(), me.as_deref(), &mut skipped)?;
     remove_tree(&dist, None, &mut skipped)?;
+    println!("{}", clean_report(&skipped, me.as_deref()));
+    Ok(())
+}
 
+/// The message `clean` prints after the hand-removal pass: a success note, plus
+/// any files it could not delete because a process holds them.
+///
+/// A locked file (e.g. the recorder DLL a still-running target loaded) is
+/// **reported, not fatal** — `clean` must never fail a build. The running
+/// `xtask` image is expected and not listed.
+fn clean_report(skipped: &[PathBuf], self_exe: Option<&Path>) -> String {
     let others: Vec<&PathBuf> = skipped
         .iter()
-        .filter(|p| !me.as_deref().is_some_and(|m| same_file(p, m)))
+        .filter(|p| !self_exe.is_some_and(|m| same_file(p, m)))
         .collect();
     if others.is_empty() {
-        println!("cleaned target/ and dist/ (the running xtask image is released on exit)");
-        return Ok(());
+        return "cleaned target/ and dist/ (the running xtask image is released on exit)"
+            .to_string();
     }
     let list = others
         .iter()
         .map(|p| p.display().to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    Err(format!("could not remove (locked): {list}"))
+    format!(
+        "cleaned target/ and dist/; {} file(s) are in use by a running process and were left \
+         (close the hooked app to remove them): {list}",
+        others.len()
+    )
 }
 
 /// Recursively remove `path`, recording (not failing on) files we cannot
@@ -148,5 +163,24 @@ mod tests {
         let mut skipped = Vec::new();
         remove_tree(&missing, None, &mut skipped).unwrap();
         assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn clean_report_is_never_fatal_and_lists_locked_files() {
+        // Catches: `clean` failing (or silently hiding) a file a running target
+        // holds. A locked recorder DLL is expected on Windows; it must be
+        // reported, not turned into an error that blocks the build.
+        let base = temp_dir("report");
+        let locked = base.join("hook_rt.dll");
+        fs::write(&locked, b"locked by a target").unwrap();
+
+        let none = clean_report(&[], None);
+        assert!(none.contains("cleaned target/ and dist/"), "{none}");
+
+        let one = clean_report(std::slice::from_ref(&locked), None);
+        assert!(one.contains("in use"), "{one}");
+        assert!(one.contains("hook_rt.dll"), "{one}");
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

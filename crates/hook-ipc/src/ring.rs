@@ -10,7 +10,7 @@
 use core::sync::atomic::{fence, Ordering};
 
 use crate::layout::{
-    get_u16, get_u32, get_u64, put_u16, put_u32, put_u64, slot_offset, FrameRecord, Header,
+    get_u16, get_u32, get_u64, put_u16, put_u32, put_u64, slot_offset, FrameRecord, Header, Status,
     HEADER_OFF_CALLS, HEADER_OFF_CAPACITY, HEADER_OFF_ERRORS, HEADER_OFF_MAGIC,
     HEADER_OFF_NEXT_SEQ, HEADER_OFF_PID, HEADER_OFF_QPC_FREQ, HEADER_OFF_SLOT_SIZE,
     HEADER_OFF_VERSION, MAGIC, RING_CAPACITY, SLOT_SIZE, STATUS_OFF_ATTEMPTED, STATUS_OFF_ERRORS,
@@ -270,7 +270,24 @@ impl<'a> RingReader<'a> {
 
     /// The installed-API bitmask from the status block.
     pub fn installed_mask(&self) -> u32 {
-        get_u32(self.buf, STATUS_OFF_INSTALLED).unwrap_or(0)
+        self.status().installed
+    }
+
+    /// The last recorded internal error code from the status block (0 if none).
+    pub fn last_error(&self) -> i32 {
+        self.status().last_error
+    }
+
+    /// The decoded status block (install + rescan tracking).
+    pub fn status(&self) -> Status {
+        Status {
+            installed: get_u32(self.buf, STATUS_OFF_INSTALLED).unwrap_or(0),
+            errors: get_u32(self.buf, STATUS_OFF_ERRORS).unwrap_or(0),
+            last_error: get_u32(self.buf, STATUS_OFF_LAST_ERROR).unwrap_or(0) as i32,
+            rescan_gen: get_u32(self.buf, STATUS_OFF_RESCAN_GEN).unwrap_or(0),
+            rescan_count: get_u32(self.buf, STATUS_OFF_RESCAN_COUNT).unwrap_or(0),
+            attempted: get_u32(self.buf, STATUS_OFF_ATTEMPTED).unwrap_or(0),
+        }
     }
 }
 
@@ -390,6 +407,18 @@ mod tests {
         assert_eq!(get_u32(&b.0, STATUS_OFF_RESCAN_COUNT), Some(1));
         assert_eq!(get_u32(&b.0, STATUS_OFF_ATTEMPTED), Some(1));
         assert_eq!(get_u32(&b.0, STATUS_OFF_LAST_ERROR), Some((-3i32) as u32));
+        // The decoded status bundles the same fields the host now prints.
+        assert_eq!(
+            r.status(),
+            Status {
+                installed: 0b101,
+                errors: 1,
+                last_error: -3,
+                rescan_gen: 4,
+                rescan_count: 1,
+                attempted: 1,
+            }
+        );
     }
 
     #[test]

@@ -123,6 +123,10 @@ struct Config {
     /// static import of the loader's proc-addr. This is the fully-dynamic case
     /// the in-process IAT hook cannot see and the implicit layer must capture.
     dynamic: bool,
+    /// Enter exclusive fullscreen (`SetFullscreenState(true)`) so the recorder is
+    /// tested against a target that **owns the display** (the case where a dummy
+    /// device/swapchain bootstrap is refused). Supported by `--api d3d11`.
+    fullscreen: bool,
 }
 
 /// Parse `--api <name>` and `--frames <n>`; a missing or unparsable option
@@ -139,10 +143,12 @@ fn parse_cli(args: &[String]) -> Config {
     let frames = flag(args, "--frames")
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_FRAMES);
+    let fullscreen = args.iter().any(|a| a == "--fullscreen");
     Config {
         api,
         frames,
         dynamic,
+        fullscreen,
     }
 }
 
@@ -201,6 +207,7 @@ fn main() {
         api,
         frames,
         dynamic,
+        fullscreen,
     } = parse_cli(&args);
 
     println!(
@@ -215,7 +222,7 @@ fn main() {
         std::process::exit(1);
     };
     let result = match presenter {
-        Presenter::D3d11 => run_d3d11(frames),
+        Presenter::D3d11 => run_d3d11(frames, fullscreen),
         Presenter::D3d11Factory => run_d3d11_factory(frames),
         Presenter::D3d9 => run_d3d9(frames, false),
         Presenter::D3d9Ex => run_d3d9(frames, true),
@@ -316,7 +323,7 @@ fn destroy(hwnd: HWND) {
 }
 
 /// Present `frames` frames through a D3D11 swapchain.
-fn run_d3d11(frames: u32) -> Result<(), String> {
+fn run_d3d11(frames: u32, fullscreen: bool) -> Result<(), String> {
     use windows::Win32::Foundation::{HMODULE, TRUE};
     use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
     use windows::Win32::Graphics::Direct3D11::{
@@ -378,6 +385,11 @@ fn run_d3d11(frames: u32) -> Result<(), String> {
     }
     .map_err(|e| format!("D3D11CreateDeviceAndSwapChain: {e}"))?;
     let swapchain = swapchain.ok_or("no swapchain returned")?;
+    if fullscreen {
+        // Enter exclusive fullscreen so the recorder is tested against a target
+        // that owns the display (where a dummy device bootstrap is refused).
+        let _ = unsafe { swapchain.SetFullscreenState(true, None::<&IDXGIOutput>) };
+    }
     // Exercise the resize/fullscreen detours once, halfway through. This target
     // holds no back-buffer reference, so `ResizeBuffers` needs no release first.
     let resize_at = frames / 2;
@@ -388,7 +400,9 @@ fn run_d3d11(frames: u32) -> Result<(), String> {
             let _ = unsafe {
                 swapchain.ResizeBuffers(0, 480, 360, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0))
             };
-            let _ = unsafe { swapchain.SetFullscreenState(false, None::<&IDXGIOutput>) };
+            if !fullscreen {
+                let _ = unsafe { swapchain.SetFullscreenState(false, None::<&IDXGIOutput>) };
+            }
         }
         // SAFETY: `swapchain` is live; sync=1, no present flags.
         let hr = unsafe { swapchain.Present(1, DXGI_PRESENT(0)) };
@@ -397,6 +411,8 @@ fn run_d3d11(frames: u32) -> Result<(), String> {
         }
         pace();
     }
+    // Leave fullscreen before tearing down (the swapchain requires it).
+    let _ = unsafe { swapchain.SetFullscreenState(false, None::<&IDXGIOutput>) };
     drop((device, context));
     destroy(hwnd);
     Ok(())
@@ -1677,6 +1693,15 @@ mod tests {
     fn cli_ignores_a_non_numeric_frame_count() {
         assert_eq!(parse_cli(&args(&["--frames", "lots"])).frames, 2000);
         assert_eq!(parse_cli(&args(&["--api"])).api, "d3d11");
+    }
+
+    #[test]
+    fn cli_selects_fullscreen() {
+        // Catches: `--fullscreen` not parsed, so the exclusive-fullscreen
+        // acceptance case silently runs windowed (the case a dummy device
+        // bootstrap is refused in would never be exercised).
+        assert!(!parse_cli(&args(&["--api", "d3d11"])).fullscreen);
+        assert!(parse_cli(&args(&["--api", "d3d11", "--fullscreen"])).fullscreen);
     }
 
     #[test]

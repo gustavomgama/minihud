@@ -62,11 +62,6 @@ impl Recorder {
         self.writer.note_call();
     }
 
-    /// Count a detour invocation that produced no frame record.
-    pub fn note_call(&mut self) {
-        self.writer.note_call();
-    }
-
     /// Record an internal error code.
     pub fn note_error(&mut self, code: i32) {
         self.writer.note_error(code);

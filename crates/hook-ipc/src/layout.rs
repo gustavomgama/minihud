@@ -250,6 +250,57 @@ pub struct Header {
     pub pid: u32,
 }
 
+/// The decoded status block: what the recorder installed and how its rescan is
+/// tracking the target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Status {
+    /// Installed-API bitmask (bit `api - 1`).
+    pub installed: u32,
+    /// Error count since the block was created.
+    pub errors: u32,
+    /// The most recent error code.
+    pub last_error: i32,
+    /// Latest rescan generation (increments once per pass).
+    pub rescan_gen: u32,
+    /// Number of rescan passes run.
+    pub rescan_count: u32,
+    /// Number of install attempts.
+    pub attempted: u32,
+}
+
+/// Every [`Api`], in wire-id order.
+pub const ALL_APIS: [Api; 20] = [
+    Api::DxgiPresent,
+    Api::DxgiPresent1,
+    Api::DxgiResizeBuffers,
+    Api::DxgiSetFullscreenState,
+    Api::DxgiCreateSwapChain,
+    Api::DxgiCreateSwapChainForHwnd,
+    Api::DxgiCreateSwapChainForCoreWindow,
+    Api::DxgiCreateSwapChainForComposition,
+    Api::D3d9Present,
+    Api::D3d9EndScene,
+    Api::D3d9PresentEx,
+    Api::D3d9ResetEx,
+    Api::D3d9CreateDevice,
+    Api::D3d9CreateDeviceEx,
+    Api::D3d12ExecuteCommandLists,
+    Api::WglSwapBuffers,
+    Api::WglSwapLayerBuffers,
+    Api::GdiSwapBuffers,
+    Api::EglSwapBuffers,
+    Api::VkQueuePresentKHR,
+];
+
+/// Decode an installed-API bitmask (bit `id - 1`) into labels, in id order.
+pub fn installed_labels(mask: u32) -> Vec<&'static str> {
+    ALL_APIS
+        .iter()
+        .filter(|a| mask & (1u32 << (a.as_u16() - 1)) != 0)
+        .map(|a| a.as_str())
+        .collect()
+}
+
 // -- little-endian field accessors ------------------------------------------
 
 pub fn put_u16(buf: &mut [u8], off: usize, v: u16) {
@@ -341,6 +392,31 @@ mod tests {
         assert_eq!(Api::DxgiPresent.as_str(), "dxgi.present");
         assert_eq!(Api::D3d9Present.as_str(), "d3d9.present");
         assert_eq!(Api::VkQueuePresentKHR.as_str(), "vk.queuepresent");
+    }
+
+    #[test]
+    fn installed_labels_decodes_the_mask_in_id_order() {
+        // Catches: an off-by-one in `1 << (id - 1)` (the host would report the
+        // wrong installed set) and an empty mask yielding a label.
+        assert!(installed_labels(0).is_empty());
+        assert_eq!(installed_labels(1), vec!["dxgi.present"]);
+        assert_eq!(installed_labels(1 << 1), vec!["dxgi.present1"]);
+        // The mask observed live on a D3D12 game (ids 9, 10, 13, 18).
+        let mask = (1u32 << 8) | (1u32 << 9) | (1u32 << 12) | (1u32 << 17);
+        assert_eq!(
+            installed_labels(mask),
+            vec![
+                "d3d9.present",
+                "d3d9.endscene",
+                "d3d9.createdevice",
+                "gl.gdiswapbuffers"
+            ]
+        );
+        // Every bit set -> every label, in order.
+        let all = installed_labels(u32::MAX);
+        assert_eq!(all.len(), ALL_APIS.len());
+        assert_eq!(all[0], "dxgi.present");
+        assert_eq!(*all.last().unwrap(), "vk.queuepresent");
     }
 
     #[test]
