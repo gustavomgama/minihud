@@ -11,16 +11,20 @@ use std::process::Command;
 use crate::{cargo, is_lock_err, read_dir, root, target_dir, ASSETS, EXE, PKG};
 
 /// `cargo xtask build`: build, stage, and print the exe path.
-pub fn build_and_stage(release: bool) -> Result<(), String> {
-    build(release)?;
+pub fn build_and_stage(release: bool, features: Option<&str>) -> Result<(), String> {
+    build(release, features)?;
     stage(release)?;
     println!("built {}", exe_path(release)?.display());
     Ok(())
 }
 
 /// `cargo xtask run`: build, stage, then launch the exe with the passthrough args.
-pub fn run_exe(release: bool, passthrough: &[String]) -> Result<(), String> {
-    build(release)?;
+pub fn run_exe(
+    release: bool,
+    features: Option<&str>,
+    passthrough: &[String],
+) -> Result<(), String> {
+    build(release, features)?;
     stage(release)?;
     let exe = exe_path(release)?;
     let status = Command::new(&exe)
@@ -34,8 +38,8 @@ pub fn run_exe(release: bool, passthrough: &[String]) -> Result<(), String> {
 }
 
 /// `cargo xtask dist`: build release, then assemble `dist/`.
-pub fn dist() -> Result<(), String> {
-    build(true)?;
+pub fn dist(features: Option<&str>) -> Result<(), String> {
+    build(true, features)?;
     let exe = exe_path(true)?;
     let dist = root().join("dist");
     if dist.exists() {
@@ -83,7 +87,7 @@ fn build_packages() -> &'static [&'static str] {
     &[PKG]
 }
 
-fn build(release: bool) -> Result<(), String> {
+fn build(release: bool, features: Option<&str>) -> Result<(), String> {
     let exe = profile_dir(release).join(EXE);
     if is_locked(&exe) {
         return Err(locked_msg(&exe));
@@ -95,6 +99,9 @@ fn build(release: bool) -> Result<(), String> {
     }
     if release {
         c.arg("--release");
+    }
+    if let Some(features) = features {
+        c.arg("--features").arg(features);
     }
     let status = c.status().map_err(|e| format!("spawn cargo: {e}"))?;
     if !status.success() {

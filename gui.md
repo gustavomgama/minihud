@@ -48,6 +48,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 8. [x] Polish: anchor/corner positioning, content-fit window size, `scale`,
    hairline, monospace figures, live FPS feed in GUI mode.
 9. [x] Motion: idle fade (`fade_idle_secs`) + change signature (`gui::motion`).
+10. [x] `cargo xtask --features <list>` so the documented overlay build works.
 
 ## Progress log
 
@@ -100,3 +101,8 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   and repaints at 50 ms while animating, else 250 ms. **Smoke-tested live** with
   `fade_idle_secs = 2`: the panel dims to the floor when idle. Gate green
   (174 tests, both feature sets).
+- 2026-10-11: xtask `--features <list>` (TDD): the README's
+  `cargo xtask build --features gui` was rejected before (only `--release`
+  parsed); now parsed and passed to cargo for build/run/dist. Verified live:
+  `cargo run -p xtask -- build --features gui` builds and stages. Gate green
+  (175 tests).

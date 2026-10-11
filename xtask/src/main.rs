@@ -37,7 +37,8 @@ const ERROR_SHARING_VIOLATION: i32 = 32;
 /// ERROR_DIR_NOT_EMPTY: a directory still holds a skipped/locked child.
 pub(crate) const ERROR_DIR_NOT_EMPTY: i32 = 145;
 
-const USAGE: &str = "usage: cargo xtask <build|run|dist|clean> [--release] [-- <args>]";
+const USAGE: &str =
+    "usage: cargo xtask <build|run|dist|clean> [--release] [--features <list>] [-- <args>]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -50,37 +51,50 @@ fn main() -> ExitCode {
     }
 }
 
-/// Parsed command line: the subcommand, `--release`, and anything after `--`.
+/// Parsed command line: the subcommand, `--release`, `--features`, and anything
+/// after `--`.
 struct Args {
     cmd: String,
     release: bool,
+    features: Option<String>,
     passthrough: Vec<String>,
 }
 
 /// Parse `args` (everything after the program name).
 fn parse_args(args: &[String]) -> Result<Args, String> {
-    let mut it = args.iter();
-    let cmd = it.next().map(String::as_str).unwrap_or("");
+    let cmd = args.first().map(String::as_str).unwrap_or("");
     if cmd.is_empty() {
         return Err(USAGE.into());
     }
     let mut release = false;
+    let mut features: Option<String> = None;
     let mut passthrough: Vec<String> = Vec::new();
     let mut after_dash = false;
-    for a in it {
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
         if after_dash {
             passthrough.push(a.clone());
         } else if a == "--" {
             after_dash = true;
         } else if a == "--release" {
             release = true;
+        } else if a == "--features" {
+            i += 1;
+            let v = args
+                .get(i)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| format!("--features needs a value\n{USAGE}"))?;
+            features = Some(v.clone());
         } else {
             return Err(format!("unknown arg {a:?}\n{USAGE}"));
         }
+        i += 1;
     }
     Ok(Args {
         cmd: cmd.to_string(),
         release,
+        features,
         passthrough,
     })
 }
@@ -89,12 +103,13 @@ fn run(args: &[String]) -> Result<(), String> {
     let Args {
         cmd,
         release,
+        features,
         passthrough,
     } = parse_args(args)?;
     match cmd.as_str() {
-        "build" => build::build_and_stage(release)?,
-        "run" => build::run_exe(release, &passthrough)?,
-        "dist" => build::dist()?,
+        "build" => build::build_and_stage(release, features.as_deref())?,
+        "run" => build::run_exe(release, features.as_deref(), &passthrough)?,
+        "dist" => build::dist(features.as_deref())?,
         "clean" => clean::clean()?,
         other => {
             return Err(format!(
@@ -191,6 +206,20 @@ mod tests {
         assert!(
             parse_args(&a(&["build", "--nope"])).is_err(),
             "an unknown flag is an error"
+        );
+    }
+
+    #[test]
+    fn parse_args_reads_a_features_list() {
+        // Catches: `cargo xtask build --features gui` being rejected, so the
+        // documented overlay build fails; or a valueless `--features` silently
+        // building the default feature set.
+        let p = parse_args(&a(&["build", "--features", "gui"])).unwrap();
+        assert_eq!(p.cmd, "build");
+        assert_eq!(p.features.as_deref(), Some("gui"));
+        assert!(
+            parse_args(&a(&["build", "--features"])).is_err(),
+            "--features needs a value"
         );
     }
 }
