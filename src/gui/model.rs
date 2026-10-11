@@ -86,6 +86,22 @@ pub fn rows_for(density: Density, s: &HwStats) -> Vec<Metric> {
         .collect()
 }
 
+/// The rows for an explicit, user-chosen list of labels (case-insensitive), in
+/// the given order. Unknown names are skipped, so a typo drops one row rather
+/// than failing the whole overlay.
+pub fn rows_named(s: &HwStats, names: &[String]) -> Vec<Metric> {
+    let all = rows(s);
+    names
+        .iter()
+        .filter_map(|name| {
+            let want = name.trim().to_ascii_lowercase();
+            all.iter()
+                .find(|m| m.label.to_ascii_lowercase() == want)
+                .cloned()
+        })
+        .collect()
+}
+
 /// The missing-sensor placeholder. Every `--` in the overlay comes from here.
 fn dashes() -> String {
     "--".to_string()
@@ -308,5 +324,29 @@ mod tests {
         );
         assert_eq!(row(&rows(&HwStats::default()), "GPU temp").tint, None);
         assert_eq!(row(&rows(&HwStats::default()), "CPU").tint, None);
+    }
+
+    #[test]
+    fn named_rows_select_and_order_by_the_given_names() {
+        // Catches: a custom `metrics` list ignored (the density wins) or
+        // reordered against the user's choice.
+        let names = vec!["GPU".to_string(), "CPU".to_string()];
+        let got: Vec<_> = rows_named(&HwStats::default(), &names)
+            .iter()
+            .map(|m| m.label)
+            .collect();
+        assert_eq!(got, ["GPU", "CPU"]);
+    }
+
+    #[test]
+    fn named_rows_match_case_insensitively_and_skip_unknown() {
+        // Catches: a case difference dropping a row, or an unknown name
+        // panicking instead of being skipped.
+        let names = vec!["ram".to_string(), "Nope".to_string()];
+        let got: Vec<_> = rows_named(&HwStats::default(), &names)
+            .iter()
+            .map(|m| m.label)
+            .collect();
+        assert_eq!(got, ["RAM"]);
     }
 }

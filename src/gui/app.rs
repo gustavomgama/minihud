@@ -102,7 +102,10 @@ impl eframe::App for Overlay {
         }
 
         let snap = self.data.lock().map(|g| g.clone()).unwrap_or_default();
-        let rows = model::rows_for(self.cfg.density, &snap.stats);
+        let rows = match &self.cfg.metrics {
+            Some(names) => model::rows_named(&snap.stats, names),
+            None => model::rows_for(self.cfg.density, &snap.stats),
+        };
 
         // Idle fade: full while values move, dimmed once they settle.
         let sig = motion::signature(&rows, snap.fps, snap.one_percent_low);

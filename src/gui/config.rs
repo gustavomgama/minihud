@@ -58,6 +58,9 @@ pub struct Config {
     /// Optional `--match` glob to follow, so a set-and-forget overlay can pin a
     /// target without a CLI flag. A `--match` on the command line wins.
     pub target: Option<String>,
+    /// An explicit list of metric labels to show (case-insensitive), in order.
+    /// Overrides `density` when set; unknown names are skipped.
+    pub metrics: Option<Vec<String>>,
 }
 
 impl Default for Config {
@@ -73,6 +76,7 @@ impl Default for Config {
             poll_ms: 500,
             fade_idle_secs: 0,
             target: None,
+            metrics: None,
         }
     }
 }
@@ -169,6 +173,7 @@ mod tests {
         assert_eq!(c.poll_ms, 500);
         assert_eq!(c.fade_idle_secs, 0);
         assert_eq!(c.target, None);
+        assert_eq!(c.metrics, None);
     }
 
     #[test]
@@ -240,6 +245,14 @@ mod tests {
         assert_eq!(Config::default().accent_color, None);
         let c = Config::from_toml("accent_color = \"#ff8800\"\n").expect("parse");
         assert_eq!(c.accent_color.as_deref(), Some("#ff8800"));
+    }
+
+    #[test]
+    fn metrics_parses_an_explicit_list_and_defaults_to_none() {
+        // Catches: a custom `metrics` list being ignored (the density wins).
+        assert_eq!(Config::default().metrics, None);
+        let c = Config::from_toml("metrics = [\"GPU\", \"CPU\"]\n").expect("parse");
+        assert_eq!(c.metrics, Some(vec!["GPU".to_string(), "CPU".to_string()]));
     }
 
     fn temp_path(tag: &str) -> std::path::PathBuf {

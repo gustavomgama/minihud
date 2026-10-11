@@ -72,6 +72,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 23. [x] `--gui --follow-secs <n>` bounds the overlay (was silently ignored).
 24. [x] Show the followed target name (top-right) so set-and-forget is confirmable.
 25. [x] Custom accent colour: `accent_color = "#rrggbb"` (`theme::parse_hex`).
+26. [x] Explicit metric list: `metrics = [...]` overrides `density` (`model::rows_named`).
 
 ## Progress log
 
@@ -212,3 +213,8 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   so a bad value falls back to `accent`. Example + README/CHANGELOG updated.
   **Verified live**: `#ff8800` tints the hero and rail orange. Gate green
   (191 tests, both features).
+- 2026-10-11: Explicit metric list (item 26). `metrics = [...]` overrides
+  `density`; `model::rows_named` (TDD) selects labels case-insensitively in the
+  given order and skips unknowns. Example + README/CHANGELOG updated.
+  **Verified live**: a GPU-only list renders. Gate green (194 tests, both
+  features).

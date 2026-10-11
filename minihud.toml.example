@@ -41,6 +41,11 @@ poll_ms = 500
 # Fade the panel out after this many seconds with no change. 0 = never fade.
 fade_idle_secs = 0
 
+# Optional explicit list of metrics to show, overriding `density`. Labels are
+# case-insensitive and shown in the order given; unknown names are skipped.
+# Available: "CPU", "CPU temp", "RAM", "GPU", "GPU temp", "VRAM", "GPU power".
+# metrics = ["GPU", "GPU temp", "VRAM", "GPU power"]
+
 # Optional target to follow, by case-insensitive glob (like --match). Unset =
 # follow the foreground window. A --match on the command line overrides this.
 # target = "deadlock*.exe"
