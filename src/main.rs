@@ -72,6 +72,11 @@ fn main() -> Result<()> {
             stats_loop(hw, Arc::new(AtomicBool::new(false)));
             Ok(())
         }
+        // The OSD overlay window (feature `gui`).
+        Mode::Gui => {
+            ensure_elevated();
+            report("--gui", run_gui(hw))
+        }
         // Default: follow the foreground process (or `--match`), showing fps +
         // hardware stats on the same line. `--fps-poll` drives the target poll.
         Mode::Follow(follow) => {
@@ -124,10 +129,15 @@ fn parse_hw_opts(args: &[String]) -> HwOpts {
 enum Mode {
     StatsOnly,
     Follow(hook::follow::FollowArgs),
+    Gui,
 }
 
-/// Resolve the run mode: `--stats-only`, else the default `--follow`.
+/// Resolve the run mode: `--gui` wins, then `--stats-only`, else the default
+/// `--follow`.
 fn select_mode(args: &[String]) -> Mode {
+    if args.iter().any(|a| a == "--gui") {
+        return Mode::Gui;
+    }
     if args.iter().any(|a| a == "--stats-only") {
         return Mode::StatsOnly;
     }
@@ -163,6 +173,43 @@ where
     stop.store(true, Ordering::SeqCst);
     let _ = worker.join();
     result
+}
+
+/// Run the OSD overlay: poll hardware in the background and paint the window
+/// on this (the main) thread, which the windowing system requires.
+#[cfg(feature = "gui")]
+fn run_gui(hw: HwOpts) -> std::result::Result<(), String> {
+    let cfg = gui::config::resolve();
+    let data = Arc::new(std::sync::Mutex::new(gui::app::Snapshot::default()));
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let worker = {
+        let data = data.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut poller = hw::HwPoller::new(hw.poll_ms);
+            while !stop.load(Ordering::SeqCst) && console::should_run() {
+                if poller.update().is_some() {
+                    if let Ok(mut snap) = data.lock() {
+                        snap.stats = poller.cached().clone();
+                    }
+                }
+                std::thread::sleep(poller.due_in());
+            }
+        })
+    };
+
+    let result = gui::app::run(cfg, data);
+    stop.store(true, Ordering::SeqCst);
+    let _ = worker.join();
+    result.map_err(|e| e.to_string())
+}
+
+/// `--gui` needs the crate built with `--features gui`.
+#[cfg(not(feature = "gui"))]
+fn run_gui(_hw: HwOpts) -> std::result::Result<(), String> {
+    tracing::error!("--gui requires a build with the `gui` feature (cargo build --features gui)");
+    std::process::exit(2);
 }
 
 /// Poll the hardware sensors at the configured cadence and update the status
@@ -359,6 +406,7 @@ fn usage() -> String {
          USAGE:\n\
          \x20   minihud                                  show the foreground target's fps + hardware stats (default)\n\
          \x20   minihud --stats-only                     print hardware stats only (no fps)\n\
+         \x20   minihud --gui                            show the OSD overlay window (needs --features gui)\n\
          \x20   minihud --follow [--match <glob>] [--follow-secs <n>]\n\
          \x20   minihud -h | --help                      print this help\n\
          \n\
@@ -401,6 +449,15 @@ mod tests {
 
     fn a(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn select_mode_recognizes_gui_and_lets_it_win() {
+        // Catches: `--gui` being ignored (the overlay never launches) or losing
+        // to `--stats-only` when both are passed.
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(select_mode(&a(&["--gui"])), Mode::Gui);
+        assert_eq!(select_mode(&a(&["--gui", "--stats-only"])), Mode::Gui);
     }
 
     #[test]

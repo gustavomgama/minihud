@@ -43,8 +43,10 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 4. [x] `gui::app` — eframe overlay: transparent, always-on-top, click-through.
 5. [~] Accent theming done (`gui::theme`: thermal gradient + load thresholds);
    densities (Zen/Standard/Full row selection) done (`gui::model::rows_for`).
-6. [ ] `--gui` wiring in `main.rs`; `cargo xtask` staging.
+6. [x] `--gui` wiring in `main.rs`; `cargo xtask` staging.
 7. [ ] README/CHANGELOG; commit + push `gui`.
+8. [ ] Polish: anchor/corner positioning, content-fit window size, `scale`,
+   live FPS feed in GUI mode, hairline, tabular-figure font.
 
 ## Progress log
 
@@ -66,3 +68,10 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   (`glow`+`default_fonts`+`inspection`+`accesskit`). Compiles and clippy-clean
   with `--features gui`. Gate green (162 tests). NOT yet launched or wired to
   live data (item 6).
+- 2026-10-11: `--gui` wired (item 6). `Config::load` + `resolve` (TDD, 3 tests:
+  missing→defaults, present→parsed, broken→error), `Mode::Gui` in `select_mode`
+  (TDD), dispatch via `report("--gui", ..)`, background `HwPoller`→`Snapshot`,
+  overlay launched on the main thread. **Smoke-tested live** through egui-mcp:
+  the window renders (rounded glass panel, hero FPS `--`, CPU `0%` + bar, RAM/GPU
+  `--`). LHM DLL not staged so hardware reads `--`; FPS not yet fed in GUI mode.
+  Gate green (166 tests, default and `--features gui`, both clippy-clean).

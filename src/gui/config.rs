@@ -87,7 +87,60 @@ impl Config {
             ..self
         }
     }
+
+    /// Load a `minihud.toml`. A **missing** file is not an error — it yields the
+    /// defaults, so the overlay works out of the box; a present-but-broken file
+    /// is an error the caller can report.
+    pub fn load(path: &std::path::Path) -> Result<Config, LoadError> {
+        match std::fs::read_to_string(path) {
+            Ok(s) => Config::from_toml(&s).map_err(LoadError::Parse),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+            Err(e) => Err(LoadError::Io(e)),
+        }
+    }
 }
+
+/// Resolve the effective config: the first existing `minihud.toml` next to the
+/// executable or in the working directory, else the defaults. A present-but-
+/// broken file logs and falls back to the defaults so the overlay still starts.
+pub fn resolve() -> Config {
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|p| p.join("minihud.toml")));
+    let cwd = Some(std::path::PathBuf::from("minihud.toml"));
+    for path in [exe, cwd].into_iter().flatten() {
+        if path.exists() {
+            return match Config::load(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("{path:?}: {e}; using default config");
+                    Config::default()
+                }
+            };
+        }
+    }
+    Config::default()
+}
+
+/// Why a config file could not be loaded.
+#[derive(Debug)]
+pub enum LoadError {
+    /// The file exists but could not be read.
+    Io(std::io::Error),
+    /// The file was read but is not valid `minihud.toml`.
+    Parse(toml::de::Error),
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LoadError::Io(e) => write!(f, "reading config: {e}"),
+            LoadError::Parse(e) => write!(f, "parsing config: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for LoadError {}
 
 #[cfg(test)]
 mod tests {
@@ -160,5 +213,46 @@ mod tests {
         // Catches: an invalid density/anchor/accent silently falling back
         // instead of telling the user the value is not one of the choices.
         assert!(Config::from_toml("density = \"turbo\"\n").is_err());
+    }
+
+    fn temp_path(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("minihud-cfg-{}-{n}-{tag}.toml", std::process::id()))
+    }
+
+    #[test]
+    fn a_missing_config_file_loads_the_defaults() {
+        // Catches: a missing minihud.toml refusing to start the overlay instead
+        // of using the out-of-the-box defaults.
+        let p = temp_path("missing");
+        assert_eq!(
+            Config::load(&p).expect("missing is not an error"),
+            Config::default()
+        );
+    }
+
+    #[test]
+    fn an_existing_config_file_is_parsed() {
+        // Catches: the loader ignoring the file (always defaults), so the user
+        // settings never apply.
+        let p = temp_path("present");
+        std::fs::write(&p, "density = \"zen\"\nopacity = 0.4\n").expect("write");
+        let c = Config::load(&p).expect("load");
+        std::fs::remove_file(&p).ok();
+        assert_eq!(c.density, Density::Zen);
+        assert_eq!(c.opacity, 0.4);
+    }
+
+    #[test]
+    fn a_broken_config_file_is_an_error() {
+        // Catches: a syntax error silently swallowed, leaving the user thinking
+        // their settings applied when the file was never parsed.
+        let p = temp_path("broken");
+        std::fs::write(&p, "density = [ oops\n").expect("write");
+        let r = Config::load(&p);
+        std::fs::remove_file(&p).ok();
+        assert!(r.is_err(), "a broken file must surface an error");
     }
 }
