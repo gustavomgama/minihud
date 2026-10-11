@@ -66,6 +66,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 17. [x] Demo mode (`MINIHUD_DEMO=1`) + README screenshots of four variations.
 18. [x] Design pass from the screenshots: compact memory, hero rework, temp tints.
 19. [x] Threshold tune: load amber at 70%, red at 85%; temps green<65, amber<80.
+20. [x] Signature accent rail on the panel's left edge.
 
 ## Progress log
 
@@ -176,3 +177,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   reads alarm and the number never disagrees with the bar). Temps get their own
   bands (green <65 °C, amber <80 °C, red above). Removed the sparkline's stray
   background box. Re-captured the two Full screenshots. Gate green (187 tests).
+- 2026-10-11: Accent rail (item 20). A 3px accent bar down the panel's left
+  edge (inset to clear the rounded corners) ties the theme colour into the panel
+  structure — previously the accent only appeared in the hero number and the
+  sparkline. Re-captured all four README screenshots. Gate green (187 tests).

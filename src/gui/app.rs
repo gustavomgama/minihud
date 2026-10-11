@@ -140,6 +140,18 @@ impl eframe::App for Overlay {
                 }
             });
 
+        // A signature accent rail on the panel's left edge, inset to clear the
+        // rounded corners.
+        let corner = 12.0 * scale;
+        let rail_w = (3.0 * scale).max(2.0);
+        let rect = panel.response.rect;
+        let rail = egui::Rect::from_min_size(
+            rect.left_top() + egui::vec2(0.0, corner),
+            egui::vec2(rail_w, (rect.height() - 2.0 * corner).max(rail_w)),
+        );
+        ui.painter()
+            .rect_filled(rail, egui::CornerRadius::same(rail_w as u8), accent);
+
         // Fit the window to the measured panel: `content_size` is only an
         // initial guess, so a bottom/right anchor sits flush instead of being
         // offset by any leftover height.
