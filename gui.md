@@ -80,6 +80,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 24. [x] Show the followed target name (top-right) so set-and-forget is confirmable.
 25. [x] Custom accent colour: `accent_color = "#rrggbb"` (`theme::parse_hex`).
 26. [x] Explicit metric list: `metrics = [...]` overrides `density` (`model::rows_named`).
+27. [x] Settled fade stops repainting at 20 fps (`motion::fade_animating`).
 
 ## Progress log
 
@@ -225,6 +226,11 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   given order and skips unknowns. Example + README/CHANGELOG updated.
   **Verified live**: a GPU-only list renders. Gate green (194 tests, both
   features).
+- 2026-10-11: Settled fade (item 27). A fully-faded panel kept repainting at
+  20 fps because the check was `factor < 0.999` (a settled 0.15 never reaches
+  1.0). `motion::fade_animating` (TDD) repaints fast only while the factor is
+  actually changing; `Overlay` tracks `last_factor`. CHANGELOG updated. Gate
+  green (195 tests, both features).
 - 2026-10-11: Chased the last gap — the live FPS figure. With
   `--gui --match steamwebhelper.exe` (a capturable, D3D-presenting target) the
   overlay resolves the target, logs `following steamwebhelper.exe (pid 1540)`,
