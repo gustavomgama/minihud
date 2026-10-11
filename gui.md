@@ -98,6 +98,7 @@ Every GUI change ends with eyes on the panel, not just green tests:
 29. [x] Bare run opens the overlay natively (no `--gui` flag).
 30. [x] GUI runs keep the console hardware + fps status line.
 31. [x] Visual verification loop: screenshot + inspect every GUI change.
+32. [ ] Empty panel with a followed-but-failing target (needs the live tree).
 
 ## Progress log
 
@@ -276,4 +277,11 @@ Every GUI change ends with eyes on the panel, not just green tests:
   visual loop). Demo overlay screenshotted + tree-queried live: hero 128 FPS
   with stacked `1% low`, `deadlock.exe` top-right, CPU/RAM/GPU rows with
   green bars under sub-70% loads, accent rail on the left edge, no clipping
-  (panel 260x171). No defects; thermal hero reads warm-pink at ~70C as designed.
+   (panel 260x171). No defects; thermal hero reads warm-pink at ~70C as designed.
+- 2026-10-11: Empty-panel report (item 32, open). A run following PioneerGame
+  with PresentMon failing showed a fully empty panel. Reproduced the exact
+  feed state locally (`--match msedgewebview2.exe`, PresentMon exiting, target
+  followed): hero `--`, rows, and target name all render — the current build
+  does not produce an empty panel in this state. Cause is elsewhere (their
+  config or exe age); next step is reading their live widget tree, which needs
+  their instance launched with `EGUI_INSPECTION=1`.
