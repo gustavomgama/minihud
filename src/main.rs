@@ -11,7 +11,10 @@ mod fps;
 mod hook;
 mod hw;
 mod render;
+mod retry;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use windows::core::{Result, PCWSTR};
@@ -21,14 +24,12 @@ use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 /// Default tracing filter: everything at `info`. Overridable with `RUST_LOG`.
 const DEFAULT_LOG_FILTER: &str = "info";
 
-/// Active hardware poll cadence (ms) for the status line. The bridge reads
-/// continuously (see [`hw::lhm::BRIDGE_POLL_MS`]); this only sets how often the
-/// displayed values refresh. Override with `--interval-ms <n>`.
-const DEFAULT_INTERVAL_MS: u64 = 500;
-/// Idle backoff cap (ms): `1` means **no backoff** — the poller never slows
-/// below the active cadence (the value is clamped up to
-/// [`DEFAULT_INTERVAL_MS`]). Override with `--hw-idle-ms <n>`.
-const DEFAULT_HW_IDLE_MS: u64 = 1;
+/// Hardware poll cadence (ms): one value drives both the status-line refresh
+/// and the LHM bridge tick. Override with `--hardware-poll <n>`.
+const DEFAULT_HW_POLL_MS: u64 = 500;
+/// Longest slice the shutdown-aware poll wait sleeps before re-checking the stop
+/// flag, so exit reaps the LHM child promptly at any poll cadence.
+const SHUTDOWN_POLL: Duration = Duration::from_millis(100);
 /// ShellExecuteW reports success as a value greater than 32 (Win32 docs).
 const SHELLEXECUTE_SUCCESS: isize = 32;
 
@@ -63,28 +64,22 @@ fn main() -> Result<()> {
     }
 
     let hw = parse_hw_opts(&args);
-    let interval = hw.active_ms;
     let result = match select_mode(&args) {
         // Hardware stats only, never capture.
         Mode::StatsOnly => {
             ensure_elevated();
-            stats_loop(hw);
+            stats_loop(hw, Arc::new(AtomicBool::new(false)));
             Ok(())
         }
         // Default: follow the foreground process (or `--match`), showing fps +
-        // hardware stats on the same line. `--poll-ms` overrides the tick.
+        // hardware stats on the same line. `--fps-poll` drives the target poll.
         Mode::Follow(follow) => {
             ensure_elevated();
-            let poll = if args.iter().any(|a| a == "--poll-ms") {
-                follow.poll_ms
-            } else {
-                interval
-            };
             let fps = fps::parse_fps_opts(&args);
             report(
                 "--follow",
                 run_with_stats(hw, move || {
-                    fps::follow::run(follow.match_glob, poll, follow.secs, fps)
+                    fps::follow::run(follow.match_glob, follow.secs, fps)
                 }),
             )
         }
@@ -93,46 +88,33 @@ fn main() -> Result<()> {
     result
 }
 
-/// The hardware cadence knobs: active poll, idle backoff cap, and bridge tick.
+/// The hardware cadence: one poll value drives the status-line refresh and the
+/// LHM bridge tick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct HwOpts {
-    active_ms: u64,
-    idle_ms: u64,
-    bridge_ms: u64,
+    poll_ms: u64,
 }
 
 impl Default for HwOpts {
     fn default() -> Self {
         Self {
-            active_ms: DEFAULT_INTERVAL_MS,
-            idle_ms: DEFAULT_HW_IDLE_MS,
-            bridge_ms: hw::lhm::BRIDGE_POLL_MS,
+            poll_ms: DEFAULT_HW_POLL_MS,
         }
     }
 }
 
-/// Parse `--interval-ms <n>` (active), `--hw-idle-ms <n>` (idle cap), and
-/// `--bridge-ms <n>` (LHM tick). A zero/unparseable/valueless flag keeps the
-/// default; the idle cap is raised to the active cadence so the backoff stays
-/// meaningful.
+/// Parse `--hardware-poll <n>`. A zero/unparseable/valueless flag keeps the
+/// default.
 fn parse_hw_opts(args: &[String]) -> HwOpts {
     let mut o = HwOpts::default();
-    let num = |flag: &str| {
-        args.windows(2)
-            .find(|w| w[0] == flag)
-            .and_then(|w| w[1].parse::<u64>().ok())
-            .filter(|&n| n > 0)
-    };
-    if let Some(n) = num("--interval-ms") {
-        o.active_ms = n;
+    if let Some(n) = args
+        .windows(2)
+        .find(|w| w[0] == "--hardware-poll")
+        .and_then(|w| w[1].parse::<u64>().ok())
+        .filter(|&n| n > 0)
+    {
+        o.poll_ms = n;
     }
-    if let Some(n) = num("--hw-idle-ms") {
-        o.idle_ms = n;
-    }
-    if let Some(n) = num("--bridge-ms") {
-        o.bridge_ms = n;
-    }
-    o.idle_ms = o.idle_ms.max(o.active_ms);
     o
 }
 
@@ -163,25 +145,35 @@ fn report(flag: &str, result: std::result::Result<(), String>) -> Result<()> {
 /// Run a closure on this thread while the hardware-stats poller updates the
 /// status line on the same console in the background, so the fps logging and
 /// the hardware stats share one output.
+///
+/// After the capture returns, the stats thread is asked to stop and joined, so
+/// its [`hw::HwPoller`] — and the LHM child it owns — is dropped deterministically
+/// instead of being abandoned at process exit.
 fn run_with_stats<F>(hw: HwOpts, capture: F) -> std::result::Result<(), String>
 where
     F: FnOnce() -> std::result::Result<(), String>,
 {
-    std::thread::spawn(move || stats_loop(hw));
-    capture()
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker = {
+        let stop = stop.clone();
+        std::thread::spawn(move || stats_loop(hw, stop))
+    };
+    let result = capture();
+    stop.store(true, Ordering::SeqCst);
+    let _ = worker.join();
+    result
 }
 
-/// Poll the hardware sensors at the active cadence (backing off to idle when
-/// they settle) and update the status line, forever. Sleeps exactly until the
-/// next due poll (`HwPoller::due_in`) instead of a fixed slice, so an update is
-/// never delayed by up to a slice.
-fn stats_loop(opts: HwOpts) {
-    let mut poller = hw::HwPoller::new(opts.active_ms, opts.idle_ms, opts.bridge_ms);
-    loop {
+/// Poll the hardware sensors at the configured cadence and update the status
+/// line until `stop` is set or Ctrl+C. Owns the [`hw::HwPoller`] (and thus the
+/// LHM feed), so returning drops it and reaps the child.
+fn stats_loop(opts: HwOpts, stop: Arc<AtomicBool>) {
+    let mut poller = hw::HwPoller::new(opts.poll_ms);
+    while !stop.load(Ordering::SeqCst) && console::should_run() {
         if poller.update().is_some() {
             console::status_hw(render::line(poller.cached()));
         }
-        std::thread::sleep(poller.due_in());
+        wait_for_due(&stop, poller.due_in());
     }
 }
 
@@ -195,7 +187,16 @@ fn stats_reporter() {
         std::thread::sleep(period);
         let cur = console::counters();
         let (hw, fps, ticks) = rate_per_sec(prev, cur, last.elapsed().as_secs_f64());
-        tracing::info!("rate: hw {hw:.1}/s, fps {fps:.1}/s (fps tick {ticks:.0}/s)");
+        tracing::info!(
+            "{}",
+            stats_line(
+                hw,
+                fps,
+                ticks,
+                retry::FPS_RETRIES.total(),
+                retry::HW_RETRIES.total()
+            )
+        );
         prev = cur;
         last = Instant::now();
     }
@@ -217,6 +218,31 @@ fn rate_per_sec(prev: (u64, u64, u64), cur: (u64, u64, u64), dt: f64) -> (f64, f
         rate(prev.1, cur.1),
         rate(prev.2, cur.2),
     )
+}
+
+/// Format the `--stats` line: the achieved update rates plus the cumulative
+/// per-feed retry counts, so a wedged dependency is visible live. Pure, so the
+/// diagnostics content is unit-tested.
+fn stats_line(hw: f64, fps: f64, ticks: f64, fps_retries: u64, hw_retries: u64) -> String {
+    format!(
+        "rate: hw {hw:.1}/s, fps {fps:.1}/s (fps tick {ticks:.0}/s); retries fps {fps_retries}, hw {hw_retries}"
+    )
+}
+
+/// Sleep until `due` from now, waking early when `stop` is set. Bounded so
+/// shutdown reaps the LHM child promptly even at a large `--hardware-poll`.
+fn wait_for_due(stop: &AtomicBool, due: Duration) {
+    let deadline = Instant::now() + due;
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return;
+        }
+        std::thread::sleep((deadline - now).min(SHUTDOWN_POLL));
+    }
 }
 
 /// Ask for UAC elevation when not already elevated, so CPU temp/power
@@ -332,7 +358,7 @@ fn usage() -> String {
          USAGE:\n\
          \x20   minihud                                  show the foreground target's fps + hardware stats (default)\n\
          \x20   minihud --stats-only                     print hardware stats only (no fps)\n\
-         \x20   minihud --follow [--match <glob>] [--poll-ms <n>] [--follow-secs <n>]\n\
+         \x20   minihud --follow [--match <glob>] [--follow-secs <n>]\n\
          \x20   minihud -h | --help                      print this help\n\
          \n\
          A <pid|name> is a numeric pid or a process image name (case-insensitive,\n\
@@ -342,12 +368,12 @@ fn usage() -> String {
          \x20   The default and --follow show the target's fps/frametime + 1% low from\n\
          \x20   ETW present events via a spawned PresentMon.exe — no dll injection or game\n\
          \x20   hook of any kind. If an anti-cheat blocks the ETW session the fps reads `--`\n\
-         \x20   and the run continues.\n\
+         \x20   and the run continues. The readout is the average fps over a fixed\n\
+         \x20   {fps_window} ms window, refreshed every --fps-poll ms.\n\
          \x20   --fps / --no-fps            enable / disable the ETW fps readout (default: on).\n\
-         \x20   --fps-window-ms <n>        rolling fps window in ms (default {fps_window}). Any value\n\
-         \x20                              >= 1 is honored literally; below ~1 frame of history the\n\
-         \x20                              readout is meaningless, so a tiny window is your choice.\n\
-         \x20   --fps-rate-ms <n>          fps status-line redraw cadence in ms (default {fps_tick}).\n\
+         \x20   --fps-poll <n>             fps refresh cadence in ms (default {fps_poll}): how often\n\
+         \x20                              the readout redraws and the target is re-resolved. The\n\
+         \x20                              average is always over a fixed {fps_window} ms window.\n\
          \x20   --fps-pid <pid|name>       explicit fps target (default: the followed/foreground\n\
          \x20                              target).\n\
          \x20   --follow                   follow the foreground target (or --match) and show its\n\
@@ -355,24 +381,16 @@ fn usage() -> String {
          \x20                              Ctrl+C to stop.\n\
          \x20   --match <glob>             with --follow, target an exe by case-insensitive glob\n\
          \x20                              instead of the foreground process (e.g. deadlock*.exe).\n\
-         \x20   --poll-ms <n>              with --follow, how often to re-check the target (ms,\n\
-         \x20                              default: the --interval-ms value). The fps line redraws\n\
-         \x20                              faster, on its own tick.\n\
          \x20   --follow-secs <n>          with --follow, stop after <n> seconds (default: until Ctrl+C).\n\
-         \x20   --interval-ms <n>          active hardware-stats poll cadence in ms (default {interval}).\n\
-         \x20   --hw-idle-ms <n>           idle backoff cap in ms once values settle (default {hw_idle} =\n\
-         \x20                              no backoff; clamped up to --interval-ms).\n\
-         \x20   --bridge-ms <n>            LHM bridge tick in ms — how often sensors are read\n\
-         \x20                              (default {bridge}; 1 = read continuously — each read costs\n\
-         \x20                              ~92 ms, so the sensor rate is ~10/s regardless).\n\
+         \x20   --hardware-poll <n>        hardware-stats poll cadence in ms (default {hw_poll}). One\n\
+         \x20                              value drives both the status-line refresh and the LHM\n\
+         \x20                              bridge tick.\n\
          \x20   --stats                    log the achieved hw/fps updates-per-second once a second.\n\
          \x20   --stats-only               print hardware stats only; never show fps.\n",
         version = env!("CARGO_PKG_VERSION"),
-        interval = DEFAULT_INTERVAL_MS,
-        hw_idle = DEFAULT_HW_IDLE_MS,
-        bridge = hw::lhm::BRIDGE_POLL_MS,
-        fps_window = fps::DEFAULT_FPS_WINDOW_MS,
-        fps_tick = fps::DEFAULT_FPS_TICK_MS,
+        hw_poll = DEFAULT_HW_POLL_MS,
+        fps_poll = fps::DEFAULT_FPS_POLL_MS,
+        fps_window = fps::FPS_WINDOW_MS,
     )
 }
 
@@ -385,78 +403,83 @@ mod tests {
     }
 
     #[test]
-    fn usage_documents_the_commands() {
-        // Catches: a flag that exists but is not documented (the user cannot
-        // discover it), or the tier-0 framing disappearing from the help text.
+    fn usage_lists_the_two_poll_flags_and_no_removed_cadence_flags() {
+        // Catches: a removed cadence flag still documented (the help lies about
+        // a flag that no longer exists) or the two surviving poll flags missing
+        // (undiscoverable). Also pins the kept flags so a rename cannot silently
+        // drop one from the help.
         let u = usage();
-        assert!(u.contains("--follow"), "{u}");
-        assert!(u.contains("--match"), "{u}");
-        assert!(u.contains("--poll-ms"), "{u}");
-        assert!(u.contains("--follow-secs"), "{u}");
-        assert!(u.contains("--stats-only"), "{u}");
-        assert!(u.contains("--interval-ms"), "{u}");
-        assert!(u.contains("--fps"), "{u}");
-        assert!(u.contains("--no-fps"), "{u}");
-        assert!(u.contains("--fps-window-ms"), "{u}");
-        assert!(u.contains("--fps-rate-ms"), "{u}");
-        assert!(u.contains("--fps-pid"), "{u}");
-        assert!(u.contains("--hw-idle-ms"), "{u}");
-        assert!(u.contains("--bridge-ms"), "{u}");
-        assert!(u.contains("--stats"), "{u}");
+        assert!(
+            u.contains("--hardware-poll"),
+            "usage must list --hardware-poll: {u}"
+        );
+        assert!(u.contains("--fps-poll"), "usage must list --fps-poll: {u}");
+        for gone in [
+            "--interval-ms",
+            "--hw-idle-ms",
+            "--bridge-ms",
+            "--fps-rate-ms",
+            "--fps-window-ms",
+            "--poll-ms",
+            "--fps-instant",
+            "--fps-window",
+        ] {
+            assert!(
+                !u.contains(gone),
+                "removed flag {gone} is still documented: {u}"
+            );
+        }
+        for kept in [
+            "--follow",
+            "--match",
+            "--follow-secs",
+            "--stats-only",
+            "--no-fps",
+            "--fps-pid",
+            "--stats",
+        ] {
+            assert!(u.contains(kept), "kept flag {kept} is undocumented: {u}");
+        }
         assert!(u.contains("tier 0"), "{u}");
     }
 
     #[test]
-    fn hw_opts_default_to_500ms_active_1ms_bridge_and_no_backoff() {
-        // Catches: the cadence regressing from the intended 500 ms status-line
-        // refresh / continuous 1 ms bridge reads, or `--hw-idle-ms` reverting to
-        // a real backoff cap above the active interval.
-        let o = parse_hw_opts(&a(&[]));
+    fn hw_opts_default_to_500ms_and_parse_hardware_poll() {
+        // Catches: the hardware cadence default drifting off 500 ms, or
+        // `--hardware-poll` being ignored (the flag does nothing).
+        let d = parse_hw_opts(&a(&[]));
+        assert_eq!(d.poll_ms, 500, "the default hardware poll must be 500 ms");
+        assert_eq!(d.poll_ms, DEFAULT_HW_POLL_MS);
         assert_eq!(
-            o.active_ms, 500,
-            "the status line must show hardware every 500 ms"
+            parse_hw_opts(&a(&["--hardware-poll", "250"])).poll_ms,
+            250,
+            "--hardware-poll must set the cadence"
         );
-        assert_eq!(
-            o.bridge_ms, 1,
-            "the bridge must read continuously (1 ms tick)"
-        );
-        assert_eq!(
-            o.idle_ms, o.active_ms,
-            "idle (1) is clamped up to the active cadence, so there is no backoff"
-        );
-        assert_eq!(o.idle_ms, 500, "1 means no backoff, not a 1 ms idle cap");
     }
 
     #[test]
-    fn hw_opts_parse_the_three_knobs_and_clamp_idle() {
-        // Catches: `--hw-idle-ms`/`--bridge-ms` being ignored, a zero value
-        // clobbering a default, or an idle cap below the active cadence (which
-        // would make the backoff meaningless).
-        let o = parse_hw_opts(&a(&[
-            "--interval-ms",
-            "150",
-            "--hw-idle-ms",
-            "800",
-            "--bridge-ms",
-            "120",
-        ]));
-        assert_eq!(o.active_ms, 150);
-        assert_eq!(o.idle_ms, 800);
-        assert_eq!(o.bridge_ms, 120);
+    fn hw_opts_keep_the_default_on_zero_unparseable_or_valueless() {
+        // Catches: `--hardware-poll 0` busy-spinning the poll loop, or an
+        // unparseable/valueless value clobbering the 500 ms default.
+        let d = parse_hw_opts(&a(&[]));
+        assert_eq!(parse_hw_opts(&a(&["--hardware-poll", "0"])), d);
+        assert_eq!(parse_hw_opts(&a(&["--hardware-poll", "soon"])), d);
+        assert_eq!(parse_hw_opts(&a(&["--hardware-poll"])), d);
+    }
 
-        let clamped = parse_hw_opts(&a(&["--interval-ms", "900", "--hw-idle-ms", "300"]));
-        assert_eq!(clamped.active_ms, 900);
-        assert_eq!(clamped.idle_ms, 900, "idle is raised to the active cadence");
-
-        // A zero/valueless/unparseable flag keeps the default cadence. Compare
-        // against the parsed default (`HwOpts::default()` is pre-clamp, so with
-        // idle=1 it differs from the effective idle=500).
-        let bad = parse_hw_opts(&a(&["--interval-ms", "0", "--bridge-ms", "soon"]));
-        assert_eq!(
-            bad,
-            parse_hw_opts(&a(&[])),
-            "zero/unparseable must not clobber the default cadence"
-        );
+    #[test]
+    fn removed_hardware_cadence_flags_are_not_recognized() {
+        // Catches: a removed flag still parsed (a silent no-op that misleads the
+        // user into thinking it changed the cadence) — each must leave the
+        // default 500 ms poll intact.
+        let d = parse_hw_opts(&a(&[]));
+        for flag in ["--interval-ms", "--hw-idle-ms", "--bridge-ms"] {
+            assert_eq!(
+                parse_hw_opts(&a(&[flag, "50"])),
+                d,
+                "{flag} must be inert (removed)"
+            );
+        }
     }
 
     #[test]
@@ -477,7 +500,6 @@ mod tests {
             select_mode(&a(&["--match", "deadlock*.exe"])),
             Mode::Follow(FollowArgs {
                 match_glob: Some("deadlock*.exe".into()),
-                poll_ms: hook::follow::DEFAULT_POLL_MS,
                 secs: None,
             })
         );
@@ -496,6 +518,45 @@ mod tests {
             rate_per_sec((0, 0, 0), (5, 5, 5), 0.0),
             (0.0, 0.0, 0.0),
             "a zero interval must not divide by zero"
+        );
+    }
+
+    #[test]
+    fn stats_line_reports_rates_and_per_feed_retry_counts() {
+        // Catches: the diagnostics line dropping the per-feed retry counters
+        // (a wedged dependency would be invisible) or misformatting the rates.
+        let line = stats_line(12.5, 60.0, 60.0, 3, 7);
+        assert!(line.contains("hw 12.5/s"), "{line}");
+        assert!(line.contains("fps 60.0/s"), "{line}");
+        assert!(line.contains("fps tick 60/s"), "{line}");
+        assert!(line.contains("retries fps 3, hw 7"), "{line}");
+    }
+
+    #[test]
+    fn wait_for_due_returns_immediately_when_stopped() {
+        // Catches: a shutdown that blocks a whole poll cadence (up to a large
+        // --hardware-poll) before the LHM child is reaped, leaving an orphan.
+        let stop = AtomicBool::new(true);
+        let t = Instant::now();
+        wait_for_due(&stop, Duration::from_secs(30));
+        assert!(
+            t.elapsed() < Duration::from_secs(1),
+            "must not sleep a cadence when stopped: {:?}",
+            t.elapsed()
+        );
+    }
+
+    #[test]
+    fn wait_for_due_sleeps_out_a_short_wait_while_running() {
+        // Catches: a wait that returns early (the poller would busy-spin instead
+        // of pacing to the cadence).
+        let stop = AtomicBool::new(false);
+        let t = Instant::now();
+        wait_for_due(&stop, Duration::from_millis(150));
+        assert!(
+            t.elapsed() >= Duration::from_millis(140),
+            "must wait the requested duration: {:?}",
+            t.elapsed()
         );
     }
 

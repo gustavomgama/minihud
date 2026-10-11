@@ -1,7 +1,7 @@
-//! Rolling frametime window and the fps/1%-low math.
+//! Rolling frametime window and the fps / 1%-low math.
 //!
 //! Pure and unit-tested: the window holds the most recent `cap` frametimes
-//! (milliseconds between presents) and derives a responsive FPS over a short
+//! (milliseconds between presents) and derives an average FPS over a short
 //! trailing window plus a 1% low over the whole buffer. The math is ported from
 //! EasyFPS's `fps_capture.rs` (MIT) and adapted to this crate's API (missing ⇒
 //! `None`, never `0.0`/a guess).
@@ -12,8 +12,8 @@
 use std::collections::VecDeque;
 
 /// Most recent frametimes kept in memory. A long history makes the 1% low
-/// meaningful (slow frames are rare); the instantaneous FPS uses only the
-/// trailing `window_ms` (see [`FpsWindow::fps`]).
+/// meaningful (slow frames are rare); the average FPS uses only the trailing
+/// `window_ms` (see [`FpsWindow::fps`]).
 pub const DEFAULT_CAP: usize = 2000;
 
 /// A bounded deque of frametime samples (ms between presents).
@@ -44,9 +44,13 @@ impl FpsWindow {
         self.samples.push_back(ms);
     }
 
-    /// Responsive FPS over the newest `window_ms` of samples, walking backwards
-    /// until the accumulated frametimes cover the window. `None` when there are
-    /// no samples (or the window is non-positive).
+    /// Average FPS over the newest `window_ms` of samples: walk the samples
+    /// newest-first, accumulating frametimes until they cover the window, then
+    /// report `frames * 1000 / covered`. `None` when there are no samples or
+    /// `window_ms` is non-positive. Invalid samples are dropped on [`record`],
+    /// so a returned value is always finite and positive.
+    ///
+    /// [`record`]: FpsWindow::record
     pub fn fps(&self, window_ms: f64) -> Option<f64> {
         if window_ms <= 0.0 {
             return None;
@@ -88,11 +92,11 @@ impl Default for FpsWindow {
     }
 }
 
-/// A source of rolling fps / 1%-low figures. The status-line renderer depends on
-/// this, not on the concrete [`super::presentmon::PresentMonFeed`], so the
+/// A source of average fps / 1%-low figures. The status-line renderer depends
+/// on this, not on the concrete [`super::presentmon::PresentMonFeed`], so the
 /// "no data ⇒ `--`" path is testable with a fake.
 pub trait FpsSource: Send + Sync {
-    /// Responsive FPS over `window_ms`, or `None` when no fresh samples exist.
+    /// Average FPS over `window_ms`, or `None` when no fresh samples exist.
     fn fps(&self, window_ms: f64) -> Option<f64>;
     /// 1% low FPS, or `None` when no fresh samples exist.
     fn one_percent_low(&self) -> Option<f64>;
@@ -112,7 +116,7 @@ impl FpsSource for FpsWindow {
 mod tests {
     use super::*;
 
-    /// The production 500 ms trailing window (EasyFPS's responsive window).
+    /// The production 500 ms trailing window (the `--fps-poll` default).
     const WINDOW_MS: f64 = 500.0;
 
     #[test]
@@ -139,6 +143,38 @@ mod tests {
     }
 
     #[test]
+    fn fps_tracks_the_recent_window_not_the_whole_buffer() {
+        // Catches: averaging the whole buffer, which would smooth the count over
+        // tens of seconds (a long 20 fps history would drag a fast burst down)
+        // instead of reporting the current window.
+        let mut w = FpsWindow::default();
+        for _ in 0..1000 {
+            w.record(50.0); // long history at 20 fps
+        }
+        for _ in 0..200 {
+            w.record(1000.0 / 120.0); // recent burst at 120 fps
+        }
+        let fps = w.fps(WINDOW_MS).expect("fps");
+        assert!(
+            (fps - 120.0).abs() < 1.0,
+            "fps must track the recent ~120, was {fps}"
+        );
+    }
+
+    #[test]
+    fn fps_is_none_for_a_nonpositive_window() {
+        // Catches: a zero/negative window silently returning a figure (a divide
+        // by zero would be NaN, or the whole buffer would be averaged) instead
+        // of the honest None.
+        let mut w = FpsWindow::default();
+        assert_eq!(w.fps(0.0), None);
+        assert_eq!(w.fps(-1.0), None);
+        w.record(16.6667);
+        assert_eq!(w.fps(0.0), None);
+        assert_eq!(w.fps(-1.0), None);
+    }
+
+    #[test]
     fn one_percent_low_reflects_the_slowest_frames() {
         // Catches: a 1% low computed from the wrong end of the distribution
         // (e.g. the fastest 1%), which would hide stutter instead of exposing it.
@@ -156,21 +192,6 @@ mod tests {
     }
 
     #[test]
-    fn fps_tracks_the_recent_window_not_the_whole_buffer() {
-        // Catches: averaging the whole buffer, which would smooth the count over
-        // tens of seconds and feel like a long-term average instead of live fps.
-        let mut w = FpsWindow::default();
-        for _ in 0..1000 {
-            w.record(50.0); // long history at 20 fps
-        }
-        for _ in 0..200 {
-            w.record(1000.0 / 120.0); // recent burst at 120 fps
-        }
-        let fps = w.fps(WINDOW_MS).expect("fps");
-        assert!(fps > 100.0, "fps should track the recent ~120, was {fps}");
-    }
-
-    #[test]
     fn record_ignores_nonpositive_and_nonfinite_samples() {
         // Catches: a zero/NaN frametime (a malformed CSV field) skewing the
         // window toward an absurd fps instead of being dropped.
@@ -184,19 +205,22 @@ mod tests {
             "only invalid samples were recorded, so there must be no fps"
         );
         w.record(16.6667);
-        assert!(w.fps(1000.0).is_some(), "a valid sample must be recorded");
+        let fps = w.fps(1000.0).expect("fps");
+        assert!(
+            (fps - 60.0).abs() < 0.01,
+            "a valid sample must be recorded: {fps}"
+        );
     }
 
     #[test]
     fn the_cap_evicts_the_oldest_samples() {
-        // Catches: an unbounded deque growing without limit during a long session.
+        // Catches: an unbounded deque growing without limit during a long
+        // session. With a cap of 3 only 30..50 ms survive: 3 frames over 120 ms
+        // = 25 fps; leaked history (10..50 ms) would instead read 33.3 fps.
         let mut w = FpsWindow::new(3);
         for i in 1..=5 {
             w.record(i as f64 * 10.0);
         }
-        // Only the newest three (30, 40, 50) remain: 3 frames over 120 ms = 25 fps.
-        // If the oldest were kept (an unbounded deque), 5 frames over 150 ms
-        // would instead read 33.3 fps.
         let fps = w.fps(1000.0).expect("fps");
         assert!(
             (fps - 25.0).abs() < 0.001,

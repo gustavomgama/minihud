@@ -5,7 +5,7 @@
 //! PresentMon/EasyFPS/FpsOverlayer. Nothing is injected into the target, so it
 //! is anti-cheat-safe by construction.
 //!
-//! - [`window`] — the pure rolling frametime window and fps / 1%-low math.
+//! - [`window`] — the pure frametime window and 1%-low math.
 //! - [`presentmon`] — the `PresentMon.exe` sidecar feed (spawn, lenient CSV
 //!   parse, graceful degradation).
 //! - [`follow`] — the default/`--follow` orchestrator (target → PresentMon →
@@ -15,26 +15,26 @@ pub mod follow;
 pub mod presentmon;
 pub mod window;
 
-/// Default trailing FPS window (ms). There is no floor: this is the effective
-/// default, and any `--fps-window-ms <n>` with `n > 0` is honored literally.
-/// Below ~1 frame of history the readout degrades into meaningless noise, which
-/// the user accepts for a deliberately tiny requested window.
-pub const DEFAULT_FPS_WINDOW_MS: u64 = 100;
+/// Fixed fps averaging window (ms): the readout always averages the newest
+/// `FPS_WINDOW_MS` of frames, independent of the refresh cadence. A fast
+/// `--fps-poll` refreshes the number more often without shrinking this window,
+/// so a fast update never makes the figure noisy.
+pub const FPS_WINDOW_MS: u64 = 500;
 
-/// Default fps status-line redraw cadence (ms). Half a second keeps the counter
-/// steady; a faster tick redraws an unchanged number and burns CPU without
-/// showing anything new.
-pub const DEFAULT_FPS_TICK_MS: u64 = 500;
+/// Default fps poll cadence (ms): the **update cadence only** — how often the
+/// readout refreshes and the target is re-resolved. The averaging window is the
+/// fixed [`FPS_WINDOW_MS`]. Override with `--fps-poll <n>`.
+pub const DEFAULT_FPS_POLL_MS: u64 = 500;
 
 /// FPS-display options from the CLI.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FpsOpts {
     /// Show the ETW fps readout (default on). `--no-fps` disables it.
     pub enabled: bool,
-    /// Rolling fps window in ms.
-    pub window_ms: u64,
-    /// Status-line redraw cadence in ms (`--fps-rate-ms`).
-    pub tick_ms: u64,
+    /// Fps poll cadence in ms (`--fps-poll`): the update cadence only — how
+    /// often the readout refreshes and the target is re-resolved. The averaging
+    /// window is the fixed [`FPS_WINDOW_MS`], not this value.
+    pub poll_ms: u64,
     /// Explicit fps target (`--fps-pid <pid|name>`); default: the followed
     /// (foreground/`--match`) target.
     pub pid: Option<String>,
@@ -44,39 +44,28 @@ impl Default for FpsOpts {
     fn default() -> Self {
         Self {
             enabled: true,
-            window_ms: DEFAULT_FPS_WINDOW_MS,
-            tick_ms: DEFAULT_FPS_TICK_MS,
+            poll_ms: DEFAULT_FPS_POLL_MS,
             pid: None,
         }
     }
 }
 
-/// Parse the fps flags: `--fps`/`--no-fps`, `--fps-window-ms <n>`,
-/// `--fps-rate-ms <n>`, `--fps-pid <pid|name>`. A valueless/non-positive/
-/// unparseable numeric value keeps the default; the last occurrence of a flag
-/// wins.
+/// Parse the fps flags: `--fps`/`--no-fps`, `--fps-poll <n>`,
+/// `--fps-pid <pid|name>`. A valueless/non-positive/unparseable numeric value
+/// keeps the default; the last occurrence of a flag wins.
 pub fn parse_fps_opts(args: &[String]) -> FpsOpts {
     let mut opts = FpsOpts::default();
     for (i, a) in args.iter().enumerate() {
         match a.as_str() {
             "--no-fps" => opts.enabled = false,
             "--fps" => opts.enabled = true,
-            "--fps-window-ms" => {
+            "--fps-poll" => {
                 if let Some(n) = args
                     .get(i + 1)
                     .and_then(|s| s.parse::<u64>().ok())
                     .filter(|&n| n > 0)
                 {
-                    opts.window_ms = n;
-                }
-            }
-            "--fps-rate-ms" => {
-                if let Some(n) = args
-                    .get(i + 1)
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .filter(|&n| n > 0)
-                {
-                    opts.tick_ms = n;
+                    opts.poll_ms = n;
                 }
             }
             "--fps-pid" => {
@@ -99,85 +88,60 @@ mod tests {
     }
 
     #[test]
-    fn fps_defaults_to_enabled_on_the_100ms_default_window_with_no_explicit_target() {
-        // Catches: fps off by default (the whole point of this change), a zero
-        // window (no fps can be computed from an empty window), or the default
-        // regressing to the raw below-the-old-floor constant (1 ms) instead of
-        // the intended 100 ms window.
+    fn fps_defaults_to_enabled_on_a_500ms_poll_with_no_explicit_target() {
+        // Catches: fps off by default, a zero poll cadence (no refresh), or a
+        // stray default target.
         let d = parse_fps_opts(&args(&[]));
         assert_eq!(d, FpsOpts::default());
         assert!(d.enabled);
-        assert_eq!(
-            d.window_ms, 100,
-            "the default window must be 100 ms, was {}",
-            d.window_ms
-        );
-        assert_eq!(d.window_ms, DEFAULT_FPS_WINDOW_MS);
+        assert_eq!(d.poll_ms, 500, "the default fps poll must be 500 ms");
+        assert_eq!(d.poll_ms, DEFAULT_FPS_POLL_MS);
         assert_eq!(d.pid, None);
     }
 
     #[test]
-    fn the_default_window_is_100ms_with_no_hidden_floor() {
-        // Catches: DEFAULT_FPS_WINDOW_MS reverting to a raw below-100 constant
-        // (e.g. 1) that only looked like a 100 ms window because a clamp used to
-        // raise it — with the clamp gone it would ship as a 1 ms window.
+    fn the_default_fps_poll_is_500ms() {
+        // Catches: DEFAULT_FPS_POLL_MS drifting off the intended 500 ms default.
         assert_eq!(
-            DEFAULT_FPS_WINDOW_MS, 100,
-            "the raw default constant must name the real 100 ms default"
+            DEFAULT_FPS_POLL_MS, 500,
+            "the raw default constant must be 500 ms"
         );
-        assert_eq!(
-            FpsOpts::default().window_ms,
-            DEFAULT_FPS_WINDOW_MS,
-            "the default must be the raw constant directly, with no clamp"
-        );
+        assert_eq!(FpsOpts::default().poll_ms, DEFAULT_FPS_POLL_MS);
     }
 
     #[test]
-    fn fps_defaults_to_a_500ms_redraw_tick() {
-        // Catches: the redraw tick regressing to the old ~16 ms cadence instead
-        // of the intended 500 ms, which burns CPU redrawing an unchanged number.
-        let d = parse_fps_opts(&args(&[]));
-        assert_eq!(
-            d.tick_ms, 500,
-            "the default redraw tick must be 500 ms, was {}",
-            d.tick_ms
-        );
-        assert_eq!(d.tick_ms, DEFAULT_FPS_TICK_MS);
+    fn the_fps_window_is_a_fixed_500ms_independent_of_the_poll() {
+        // Catches: the averaging window following `--fps-poll` — a fast poll
+        // would then shrink the window and make the number noisy.
+        assert_eq!(FPS_WINDOW_MS, 500, "the fixed fps window must be 500 ms");
     }
 
     #[test]
-    fn parses_the_tick_and_rejects_bad_values() {
-        // Catches: a zero/unparseable `--fps-rate-ms` clobbering the default (a
-        // 0ms tick would busy-spin the display loop).
-        assert_eq!(parse_fps_opts(&args(&["--fps-rate-ms", "20"])).tick_ms, 20);
-        assert_eq!(
-            parse_fps_opts(&args(&["--fps-rate-ms", "0"])).tick_ms,
-            DEFAULT_FPS_TICK_MS
-        );
-        assert_eq!(
-            parse_fps_opts(&args(&["--fps-rate-ms"])).tick_ms,
-            DEFAULT_FPS_TICK_MS
-        );
+    fn a_custom_fps_poll_sets_only_the_cadence_not_the_window() {
+        // Catches: re-deriving the average window from the poll (so
+        // `--fps-poll 50` would average only 50 ms). The poll still parses to
+        // its flag value; the window constant stays fixed at 500 ms.
+        let fast = parse_fps_opts(&args(&["--fps-poll", "50"]));
+        assert_eq!(fast.poll_ms, 50, "the poll cadence must honor the flag");
+        assert_eq!(FPS_WINDOW_MS, 500, "the window must not follow the poll");
     }
 
     #[test]
-    fn a_small_window_is_honored_literally() {
-        // Catches: removing the floor but silently still clamping (a leftover
-        // `.max(MIN_FPS_WINDOW_MS)`) so `--fps-window-ms 1` comes back as 100
-        // instead of the 1 ms the user asked for.
-        assert_eq!(
-            parse_fps_opts(&args(&["--fps-window-ms", "1"])).window_ms,
-            1,
-            "a requested 1 ms window must be honored literally, not clamped"
-        );
-        assert_eq!(
-            parse_fps_opts(&args(&["--fps-window-ms", "5"])).window_ms,
-            5
-        );
-        assert_eq!(
-            parse_fps_opts(&args(&["--fps-window-ms", "100"])).window_ms,
-            100
-        );
+    fn parses_the_fps_poll_and_rejects_bad_values() {
+        // Catches: `--fps-poll` ignored, or a zero/unparseable/valueless value
+        // clobbering the 500 ms default (0 would busy-spin the loop).
+        assert_eq!(parse_fps_opts(&args(&["--fps-poll", "250"])).poll_ms, 250);
+        for bad in [
+            &["--fps-poll", "0"][..],
+            &["--fps-poll", "soon"][..],
+            &["--fps-poll"][..],
+        ] {
+            assert_eq!(
+                parse_fps_opts(&args(bad)).poll_ms,
+                DEFAULT_FPS_POLL_MS,
+                "{bad:?} must keep the default poll"
+            );
+        }
     }
 
     #[test]
@@ -189,26 +153,22 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_window_and_rejects_bad_values() {
-        // Catches: a zero/unparseable/valueless `--fps-window-ms` clobbering the
-        // default (a zero window yields no fps at all); the fallback must keep
-        // the 100 ms default, and a removed floor must not let 0 through.
-        assert_eq!(
-            parse_fps_opts(&args(&["--fps-window-ms", "750"])).window_ms,
-            750
-        );
-        assert_eq!(
-            parse_fps_opts(&args(&["--fps-window-ms", "0"])).window_ms,
-            DEFAULT_FPS_WINDOW_MS
-        );
-        assert_eq!(
-            parse_fps_opts(&args(&["--fps-window-ms", "soon"])).window_ms,
-            DEFAULT_FPS_WINDOW_MS
-        );
-        assert_eq!(
-            parse_fps_opts(&args(&["--fps-window-ms"])).window_ms,
-            DEFAULT_FPS_WINDOW_MS
-        );
+    fn removed_fps_cadence_flags_are_not_recognized() {
+        // Catches: a removed flag still wired (a silent no-op that misleads the
+        // user) — the poll must stay at the 500 ms default.
+        let d = parse_fps_opts(&args(&[]));
+        for flag in [
+            "--fps-instant",
+            "--fps-window",
+            "--fps-window-ms",
+            "--fps-rate-ms",
+        ] {
+            assert_eq!(
+                parse_fps_opts(&args(&[flag, "50"])),
+                d,
+                "{flag} must be inert (removed)"
+            );
+        }
     }
 
     #[test]

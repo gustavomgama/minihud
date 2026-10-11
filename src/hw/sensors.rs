@@ -53,9 +53,10 @@ impl SensorFeed for LhmFeed {
     }
 }
 
-/// Polls the feed on an adaptive hardware cadence: anything changing beyond
-/// noise resets to the active rate; `STABLE_POLLS` quiet polls in a row double
-/// the interval up to the idle cap.
+/// Polls the feed on the configured hardware cadence. One `--hardware-poll`
+/// value drives both this poller and the LHM bridge tick (see [`HwPoller::new`]),
+/// so the active rate and the idle cap are the same value and the adaptive
+/// backoff never actually backs off.
 pub struct HwPoller {
     last: Instant,
     active: Duration,
@@ -68,23 +69,19 @@ pub struct HwPoller {
 }
 
 impl HwPoller {
-    pub fn new(active_ms: u64, idle_ms: u64, bridge_ms: u64) -> Self {
-        Self::with_feed(
-            active_ms,
-            idle_ms,
-            Box::new(LhmFeed::start_with_poll(bridge_ms)),
-        )
+    pub fn new(poll_ms: u64) -> Self {
+        Self::with_feed(poll_ms, Box::new(LhmFeed::start_with_poll(poll_ms)))
     }
 
     /// Build a poller over an arbitrary feed (used by tests).
-    pub fn with_feed(active_ms: u64, idle_ms: u64, feed: Box<dyn SensorFeed>) -> Self {
-        let active = Duration::from_millis(active_ms.max(1));
+    pub fn with_feed(poll_ms: u64, feed: Box<dyn SensorFeed>) -> Self {
+        let active = Duration::from_millis(poll_ms.max(1));
         Self {
             last: Instant::now() - active,
             next: active,
             stable_polls: 0,
             active,
-            idle: Duration::from_millis(idle_ms.max(active_ms.max(1))),
+            idle: active,
             feed,
             cached: HwStats::default(),
             prev: None,
@@ -292,7 +289,7 @@ mod tests {
     #[test]
     fn update_applies_the_feed_and_gates_by_cadence() {
         let feed = FixedFeed(vec![sensor("Load", "CPU Total", 42.0)]);
-        let mut p = HwPoller::with_feed(200, 1000, Box::new(feed));
+        let mut p = HwPoller::with_feed(200, Box::new(feed));
         assert!(p.update().is_some(), "first poll is due");
         assert_eq!(p.cached().cpu_percent, 42.0);
         assert!(p.update().is_none(), "an immediate second poll is not due");
@@ -300,7 +297,7 @@ mod tests {
 
     #[test]
     fn update_without_a_sample_still_reports_cached() {
-        let mut p = HwPoller::with_feed(200, 1000, Box::new(NoFeed));
+        let mut p = HwPoller::with_feed(200, Box::new(NoFeed));
         assert!(
             p.update().is_some(),
             "a due poll returns even with no sample"
@@ -337,7 +334,7 @@ mod tests {
         // Catches: the poller reporting a stale/zero wait so the loop either
         // busy-spins or sleeps past the next due poll.
         let feed = FixedFeed(vec![sensor("Load", "CPU Total", 42.0)]);
-        let mut p = HwPoller::with_feed(200, 1000, Box::new(feed));
+        let mut p = HwPoller::with_feed(200, Box::new(feed));
         assert!(p.update().is_some());
         let d = p.due_in();
         assert!(d > Duration::ZERO, "after a poll there is a wait: {d:?}");

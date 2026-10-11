@@ -11,66 +11,50 @@
 
 use std::time::Duration;
 
-/// Default poll interval for `--follow` (ms). Matches the default hardware
-/// `--interval-ms` cadence, so the target is re-resolved at the same 500 ms
-/// rhythm as the rest of the status line.
-pub const DEFAULT_POLL_MS: u64 = 500;
-
-/// Parsed `--follow [--match <glob>] [--poll-ms <n>] [--follow-secs <n>]`.
+/// Parsed `--follow [--match <glob>] [--follow-secs <n>]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FollowArgs {
     pub match_glob: Option<String>,
-    pub poll_ms: u64,
     /// Stop after this many seconds (a bounded follow). `None` runs until Ctrl+C.
     pub secs: Option<u64>,
 }
 
 impl Default for FollowArgs {
-    /// The `--follow`-as-default arguments: follow the foreground process on the
-    /// default cadence until Ctrl+C, with no name filter.
+    /// The `--follow`-as-default arguments: follow the foreground process until
+    /// Ctrl+C, with no name filter.
     fn default() -> Self {
         Self {
             match_glob: None,
-            poll_ms: DEFAULT_POLL_MS,
             secs: None,
         }
     }
 }
 
-/// Parse `--follow [--match <glob>] [--poll-ms <n>] [--follow-secs <n>]` from
-/// the process arguments.
+/// Parse `--follow [--match <glob>] [--follow-secs <n>]` from the process
+/// arguments.
 ///
 /// Returns `None` only when no follow flag is present at all. Any of
-/// `--follow`/`--match`/`--poll-ms`/`--follow-secs` selects follow mode (it is
-/// the default), so `--follow-secs 5` alone bounds the default run. A
-/// `--match`/`--poll-ms`/`--follow-secs` without a value (or an unparseable
-/// numeric one) yields `None`, so the caller falls back rather than guessing.
+/// `--follow`/`--match`/`--follow-secs` selects follow mode (it is the default),
+/// so `--follow-secs 5` alone bounds the default run. A `--match`/`--follow-secs`
+/// without a value (or an unparseable numeric one) yields `None`, so the caller
+/// falls back rather than guessing.
 pub fn parse_follow(args: &[String]) -> Option<FollowArgs> {
-    let present = args.iter().any(|a| {
-        matches!(
-            a.as_str(),
-            "--follow" | "--match" | "--poll-ms" | "--follow-secs"
-        )
-    });
+    let present = args
+        .iter()
+        .any(|a| matches!(a.as_str(), "--follow" | "--match" | "--follow-secs"));
     if !present {
         return None;
     }
     let mut match_glob = None;
-    let mut poll_ms = DEFAULT_POLL_MS;
     let mut secs = None;
     for (i, a) in args.iter().enumerate() {
         match a.as_str() {
             "--match" => match_glob = Some(args.get(i + 1)?.clone()),
-            "--poll-ms" => poll_ms = args.get(i + 1)?.parse().ok()?,
             "--follow-secs" => secs = Some(args.get(i + 1)?.parse().ok()?),
             _ => {}
         }
     }
-    Some(FollowArgs {
-        match_glob,
-        poll_ms,
-        secs,
-    })
+    Some(FollowArgs { match_glob, secs })
 }
 
 /// The file name component of a path, treating both `\` and `/` as separators.
@@ -179,8 +163,8 @@ pub fn skip_reason(pid: u32, exe_basename: &str, own_pid: u32) -> Option<String>
     None
 }
 
-/// The sleep between follow ticks. `--poll-ms 0` is clamped to 1 ms so the loop
-/// cannot busy-spin; a huge value is kept (the loop simply waits).
+/// The sleep between follow ticks. A `--fps-poll 0` is clamped to 1 ms so the
+/// loop cannot busy-spin; a huge value is kept (the loop simply waits).
 pub(crate) fn poll_delay(poll_ms: u64) -> Duration {
     Duration::from_millis(poll_ms.max(1))
 }
@@ -208,26 +192,19 @@ mod tests {
     }
 
     #[test]
-    fn follow_default_follows_the_foreground_on_the_default_cadence() {
-        // Catches: a `Default` that polls at 0 ms (busy-spin), picks a name
-        // filter when `--follow` is the default mode with no arguments, or lets
-        // the default cadence drift off the 500 ms `--interval-ms` value.
+    fn follow_default_follows_the_foreground_until_interrupt() {
+        // Catches: a `Default` that picks a name filter when `--follow` is the
+        // default mode with no arguments, or sets a spurious time bound.
         let d = FollowArgs::default();
         assert_eq!(d.match_glob, None);
-        assert_eq!(
-            d.poll_ms, 500,
-            "the default follow cadence must be 500 ms, was {}",
-            d.poll_ms
-        );
-        assert_eq!(d.poll_ms, DEFAULT_POLL_MS);
         assert_eq!(d.secs, None);
     }
 
     #[test]
     fn follow_flags_select_follow_without_the_explicit_flag() {
-        // Catches: `--follow-secs`/`--match`/`--poll-ms` being ignored when
-        // `--follow` is the default (the bound or name filter would silently do
-        // nothing), while a non-follow command still yields `None`.
+        // Catches: `--follow-secs`/`--match` being ignored when `--follow` is
+        // the default (the bound or name filter would silently do nothing),
+        // while a non-follow command still yields `None`.
         assert_eq!(
             parse_follow(&args(&["--follow-secs", "5"])).map(|f| f.secs),
             Some(Some(5))
@@ -236,12 +213,25 @@ mod tests {
             parse_follow(&args(&["--match", "game.exe"])).map(|f| f.match_glob),
             Some(Some("game.exe".to_string()))
         );
-        assert_eq!(
-            parse_follow(&args(&["--poll-ms", "100"])).map(|f| f.poll_ms),
-            Some(100)
-        );
         assert_eq!(parse_follow(&args(&["--stats-only"])), None);
         assert_eq!(parse_follow(&args(&[])), None);
+    }
+
+    #[test]
+    fn removed_poll_ms_does_not_select_follow_or_change_anything() {
+        // Catches: `--poll-ms` lingering in the parser (a silent no-op that
+        // misleads the user into thinking it set a cadence). It must neither
+        // alter a `--follow` parse nor select follow mode on its own.
+        assert_eq!(
+            parse_follow(&args(&["--follow", "--poll-ms", "100"])),
+            Some(FollowArgs::default()),
+            "--poll-ms must be inert alongside --follow"
+        );
+        assert_eq!(
+            parse_follow(&args(&["--poll-ms", "100"])),
+            None,
+            "--poll-ms alone must not select follow mode"
+        );
     }
 
     #[test]
@@ -350,25 +340,17 @@ mod tests {
             parse_follow(&args(&["--follow"])),
             Some(FollowArgs {
                 match_glob: None,
-                poll_ms: DEFAULT_POLL_MS,
                 secs: None
             })
         );
     }
 
     #[test]
-    fn parses_follow_with_match_and_poll() {
+    fn parses_follow_with_match() {
         assert_eq!(
-            parse_follow(&args(&[
-                "--follow",
-                "--match",
-                "deadlock*.exe",
-                "--poll-ms",
-                "300"
-            ])),
+            parse_follow(&args(&["--follow", "--match", "deadlock*.exe"])),
             Some(FollowArgs {
                 match_glob: Some("deadlock*.exe".to_string()),
-                poll_ms: 300,
                 secs: None
             })
         );
@@ -382,12 +364,11 @@ mod tests {
     #[test]
     fn parses_follow_secs_as_a_bounded_run() {
         // Catches: a `--follow-secs` that is ignored (the loop then never exits
-        // without a Ctrl+C) or is confused with `--poll-ms`.
+        // without a Ctrl+C).
         assert_eq!(
             parse_follow(&args(&["--follow", "--follow-secs", "5"])),
             Some(FollowArgs {
                 match_glob: None,
-                poll_ms: DEFAULT_POLL_MS,
                 secs: Some(5)
             })
         );
@@ -396,14 +377,11 @@ mod tests {
                 "--follow",
                 "--match",
                 "g.exe",
-                "--poll-ms",
-                "100",
                 "--follow-secs",
                 "2"
             ])),
             Some(FollowArgs {
                 match_glob: Some("g.exe".to_string()),
-                poll_ms: 100,
                 secs: Some(2)
             })
         );
@@ -415,7 +393,7 @@ mod tests {
         assert_eq!(
             parse_follow(&args(&["--follow", "--follow-secs"])),
             None,
-            "a valueless --follow-secs is rejected like --poll-ms"
+            "a valueless --follow-secs is rejected"
         );
         assert_eq!(
             parse_follow(&args(&["--follow", "--follow-secs", "soon"])),
@@ -481,28 +459,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_follow_accepts_the_poll_ms_bounds() {
-        // Catches: rejecting `0` or a huge `--poll-ms`, which would silently
-        // fall back to the default poll instead of honouring the request.
-        assert_eq!(
-            parse_follow(&args(&["--follow", "--poll-ms", "0"]))
-                .unwrap()
-                .poll_ms,
-            0
-        );
-        let huge = u64::MAX.to_string();
-        assert_eq!(
-            parse_follow(&args(&["--follow", "--poll-ms", &huge]))
-                .unwrap()
-                .poll_ms,
-            u64::MAX
-        );
-    }
-
-    #[test]
     fn poll_delay_clamps_zero_to_one_ms_and_keeps_large_values() {
-        // Catches: `--poll-ms 0` spinning the watch loop (busy-poll at 0 ms) and
-        // a huge value overflowing the Duration conversion.
+        // Catches: a `--fps-poll 0` spinning the watch loop (busy-poll at 0 ms)
+        // and a huge value overflowing the Duration conversion.
         assert_eq!(poll_delay(0), Duration::from_millis(1));
         assert_eq!(poll_delay(1), Duration::from_millis(1));
         assert_eq!(poll_delay(500), Duration::from_millis(500));

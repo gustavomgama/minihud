@@ -6,7 +6,7 @@ members = [
 
 [package]
 name = "minihud"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 authors = ["minihud"]
 description = "Headless LibreHardwareMonitor hardware-stats backend for Windows"

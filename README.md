@@ -31,13 +31,14 @@ that blocks injection can stop it. When an anti-cheat blocks the **ETW session**
 itself, minihud degrades gracefully: it logs once, shows `--`, and keeps
 running.
 
-The FPS **cadences are decoupled**: hardware stats refresh on `--interval-ms`
-(default 500 ms; the idle cap `--hw-idle-ms` defaults to 1 = no backoff); the follow
-target is re-resolved every `--poll-ms`. One frametime is captured per present
-into a rolling window (`--fps-window-ms`, default 100 ms; any value ≥ 1 is
-honored literally, and a very small window is meaningless) with a 1% low; the FPS
-status line redraws on its own tick (`--fps-rate-ms`, default 500 ms). `--stats`
-logs the achieved updates-per-second.
+There are exactly **two poll flags**, each defaulting to **500 ms**:
+`--hardware-poll <ms>` drives both the hardware status-line refresh and the LHM
+bridge tick; `--fps-poll <ms>` drives **how often the fps line updates** — the
+target is re-resolved and the line redrawn on that cadence. The fps figure is
+the **average over a fixed 500 ms window**, decoupled from the poll, so a single
+noisy frame never makes the number jump: `--fps-poll 50` refreshes a stable
+500 ms average 20×/s instead of shrinking the window. The 1% low still comes
+from the sample buffer. `--stats` logs the achieved updates-per-second.
 
 ---
 
@@ -67,10 +68,10 @@ powershell  lhm-bridge.ps1  ->  LhmFeed (thread)  ->  HwPoller  ->  stdout
    +-- stdin "\n" ticks, stdout JSON
 ```
 
-Hardware stats refresh on a fixed `--interval-ms` cadence (default 500 ms) with
-no idle backoff (`--hw-idle-ms` defaults to 1, which is clamped up to the active
-cadence). The bridge itself reads continuously on `--bridge-ms` (default 1 ms;
-each read costs ~92 ms, so the sensor rate is ~10/s regardless).
+Hardware stats refresh on the `--hardware-poll` cadence (default 500 ms). The same
+value drives the LHM bridge tick: the sidecar reads on that interval. Each
+`Update()` read costs ~92 ms of its own, so the effective sensor rate is bounded
+by the read rather than the tick.
 
 ---
 
@@ -130,8 +131,8 @@ target\debug\minihud.exe                          # follow the foreground target
 target\debug\minihud.exe --match deadlock*.exe    # follow a target by name
 target\debug\minihud.exe --follow-secs 30         # bounded run
 target\debug\minihud.exe --fps-pid Overwatch      # explicit fps target
-target\debug\minihud.exe --fps-window-ms 100      # rolling fps window in ms (default 100)
-target\debug\minihud.exe --fps-rate-ms 500        # fps redraw cadence (default)
+target\debug\minihud.exe --fps-poll 250           # fps refresh cadence in ms (average window is fixed at 500)
+target\debug\minihud.exe --hardware-poll 1000     # hardware refresh + LHM bridge cadence in ms (default 500)
 target\debug\minihud.exe --stats                  # log achieved updates-per-second
 target\debug\minihud.exe --no-fps                 # hardware only
 ```
@@ -144,7 +145,7 @@ the ETW session, the fps reads `--` and the run keeps going.
 ```text
 minihud                                    show the foreground target's fps + hardware stats (default)
 minihud --stats-only                       print hardware stats only (no fps)
-minihud --follow [--match <glob>] [--poll-ms <n>] [--follow-secs <n>]
+minihud --follow [--match <glob>] [--follow-secs <n>]
 minihud -h | --help                        print help
 
 <pid|name> is a numeric pid or a process image name (case-insensitive, `.exe`
@@ -152,27 +153,18 @@ optional): `Overwatch`, `overwatch.exe`, or `1234` all work.
 
 FPS (default; tier 0, ETW, never injects):
 --fps / --no-fps             enable / disable the ETW fps readout (default: on).
---fps-window-ms <n>          rolling fps window in ms (default 100). Any value >= 1 is
-                             honored literally; below ~1 frame of history the readout is
-                             meaningless, so a tiny window is your choice.
---fps-rate-ms <n>            fps status-line redraw cadence in ms (default 500).
+--fps-poll <n>               fps refresh cadence in ms (default 500): how often the readout
+                             redraws and the target is re-resolved. The average is always over
+                             a fixed 500 ms window.
 --fps-pid <pid|name>         explicit fps target (default: the followed/foreground target).
 --follow                     follow the foreground target (or --match) and show its fps via
                              ETW. This is the DEFAULT; Ctrl+C to stop. Needs elevation (ETW).
 --match <glob>               with --follow, target an exe by case-insensitive glob instead of
                              the foreground process (e.g. deadlock*.exe).
---poll-ms <n>                with --follow, how often to re-check the target (default: the
-                             --interval-ms value, 500 ms).
-                             The fps line redraws faster, on its own tick (--fps-rate-ms).
 --follow-secs <n>            with --follow, stop after <n> seconds (default: until Ctrl+C).
---interval-ms <n>            active hardware-stats poll cadence in ms (default 500).
---hw-idle-ms <n>             idle backoff cap in ms once values settle (default 1 = no
-                             backoff; clamped up to --interval-ms).
---bridge-ms <n>              LHM bridge tick in ms — how often sensors are read (default 1;
-                             1 = read continuously — each read costs ~92 ms, so the sensor
-                             rate is ~10/s regardless).
---stats                      log the achieved hw/fps updates-per-second once a second
-                             (and the fps tick cadence).
+--hardware-poll <n>          hardware-stats poll cadence in ms (default 500). One value drives
+                             both the status-line refresh and the LHM bridge tick.
+--stats                      log the achieved hw/fps updates-per-second once a second.
 --stats-only                 print hardware stats only; never show fps.
 
 MINIHUD_NO_ELEVATE=1         skip the UAC self-elevation (headless tests/diagnostics).
@@ -183,8 +175,8 @@ MINIHUD_NO_ELEVATE=1         skip the UAC self-elevation (headless tests/diagnos
 ```text
 src/main.rs          entry point: elevation, CLI dispatch, poll loop
 src/render.rs        text rendering of one HwStats sample (pure, tested)
-src/hw/              LHM sidecar feed + HwStats fields + adaptive poller
-src/fps/window.rs    rolling frametime window + fps/1%-low math (pure, tested)
+src/hw/              LHM sidecar feed + HwStats fields + single-cadence poller
+src/fps/window.rs    frametime buffer + 1%-low math (pure, tested)
 src/fps/presentmon.rs PresentMon.exe sidecar feed (spawn, CSV parse, degradation)
 src/fps/follow.rs    default/--follow ETW orchestrator (target -> PresentMon -> status)
 src/hook/proc.rs     process helpers (foreground window, Toolhelp process list)
@@ -246,9 +238,20 @@ quality subset of the same gate.
 
 The tier-0 FPS path spawns `PresentMon.exe` (staged by `cargo xtask build` from
 `tools/presentmon/PresentMon.exe`). PresentMon is Intel's ETW present-event
-collector, released under the **MIT license**; minihud ships the binary
-unmodified and only reads its stdout CSV. If the binary is absent, the build
-warns (it is an **optional** asset) and the fps row reads `--`.
+collector ([github.com/GameTechDev/PresentMon](https://github.com/GameTechDev/PresentMon)),
+released under the **MIT license**. minihud ships a **locally built, modified**
+copy (v2.6.0). Two source changes, both for low-latency stdout CSV:
+
+1. `PresentMon/OutputThread.cpp` — the realtime output-loop sleep is reduced
+   from 100 ms to 1 ms so queued presents drain promptly instead of batching
+   into ~10 output passes per second.
+2. `PresentData/PresentMonTraceSession.cpp` — the realtime ETW session's
+   `BufferSize` is reduced from 64 KB to 1 KB (with `FlushTimer = 1` bounding
+   the worst case). The 64 KB buffer held ~1 s of presents at a few hundred fps,
+   so ETW's default ~1 s flush set the output cadence; 1 KB flushes in ~30 ms.
+
+minihud only reads the stdout CSV. If the binary is absent, the build warns (it
+is an **optional** asset) and the fps row reads `--`.
 
 ## License
 

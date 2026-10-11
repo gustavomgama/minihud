@@ -6,6 +6,10 @@
 //! the main loop NEVER blocks on it — `latest()` just reads the last
 //! good sample, and rows read "--" until the first one lands.
 //!
+//! Dropping the feed stops the supervisor and kills the child, which closes its
+//! stdout pipe and unblocks the reader (the same discipline as
+//! `fps::presentmon::PresentMonFeed`), so no orphan PowerShell survives.
+//!
 //! Mapping a sample onto [`super::HwStats`] lives in [`super::apply`].
 
 use serde::Deserialize;
@@ -15,13 +19,14 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Seconds before retrying a failed bridge session.
+use crate::retry;
+
+/// Fixed backoff before retrying a failed bridge session.
 const BRIDGE_RETRY_SECS: u64 = 5;
-/// Default milliseconds between bridge polls (one JSON dump per tick). The
-/// default of `1` reads continuously for the freshest possible values; the
-/// bridge's own `Update()` read costs ~92 ms, so the sensor rate is ~10/s
-/// regardless.
-pub const BRIDGE_POLL_MS: u64 = 1;
+/// Largest jitter applied to the backoff (so feeds do not retry in lockstep).
+const MAX_JITTER: Duration = Duration::from_millis(retry::MAX_JITTER_MS);
+/// How long the backoff sleeps before re-checking the stop flag.
+const BACKOFF_POLL_MS: u64 = 100;
 
 /// One sensor reading from the bridge.
 #[derive(Clone, Debug, Deserialize)]
@@ -39,9 +44,17 @@ pub struct LhmSensor {
 /// Shared latest-sample slot: `(timestamp, sensors)` behind a mutex.
 type LhmLatest = Arc<Mutex<Option<(Instant, Vec<LhmSensor>)>>>;
 
-#[derive(Clone)]
+/// The running child plus the stop flag, so `Drop` can kill PowerShell and
+/// unblock the reader.
+#[derive(Default)]
+struct Control {
+    stop: bool,
+    child: Option<Child>,
+}
+
 pub struct LhmFeed {
     latest: LhmLatest,
+    control: Arc<Mutex<Control>>,
 }
 
 impl LhmFeed {
@@ -50,9 +63,10 @@ impl LhmFeed {
     /// caller is responsible for not pegging the machine.
     pub fn start_with_poll(poll_ms: u64) -> Self {
         let latest = Arc::new(Mutex::new(None));
-        let slot = latest.clone();
-        std::thread::spawn(move || Self::run(slot, poll_ms));
-        Self { latest }
+        let control = Arc::new(Mutex::new(Control::default()));
+        let (slot, ctl) = (latest.clone(), control.clone());
+        std::thread::spawn(move || Self::run(slot, ctl, poll_ms));
+        Self { latest, control }
     }
 
     /// Last sample if younger than `max_age`, else None (rows read
@@ -67,22 +81,74 @@ impl LhmFeed {
         }
     }
 
-    fn run(slot: LhmLatest, poll_ms: u64) {
-        loop {
-            if let Err(e) = Self::session(&slot, poll_ms) {
-                tracing::warn!("lhm bridge: {e}; retry in {BRIDGE_RETRY_SECS}s");
+    /// Run sessions until stopped, backing off (with jitter) between failures.
+    fn run(slot: LhmLatest, control: Arc<Mutex<Control>>, poll_ms: u64) {
+        let mut failures: u64 = 0;
+        let mut jitter = retry::Jitter::new(retry::seed_now(std::process::id()));
+        while !is_stopped(&control) {
+            let mut wait = Duration::from_secs(BRIDGE_RETRY_SECS);
+            if let Err(e) = Self::session(&slot, &control, poll_ms) {
+                // Drop kills the child, which surfaces here as a pipe EOF; that
+                // is a clean stop, not a failure to report.
+                if is_stopped(&control) {
+                    return;
+                }
+                failures += 1;
+                let total = retry::HW_RETRIES.bump();
+                wait = jitter.next(Duration::from_secs(BRIDGE_RETRY_SECS), MAX_JITTER);
+                retry::emit_failure("lhm bridge", &e, wait, failures, total);
             }
-            std::thread::sleep(Duration::from_secs(BRIDGE_RETRY_SECS));
+            if !backoff(&control, wait) {
+                return;
+            }
         }
     }
 
-    fn session(slot: &LhmLatest, poll_ms: u64) -> Result<(), String> {
-        let mut child = spawn_bridge()?;
-        let (mut out, mut stdin) = bridge_streams(&mut child)?;
-        read_handshake(&mut out)?;
-        tracing::info!("lhm bridge: serving");
-        pump(&mut out, &mut stdin, slot, poll_ms)
+    fn session(
+        slot: &LhmLatest,
+        control: &Arc<Mutex<Control>>,
+        poll_ms: u64,
+    ) -> Result<(), String> {
+        let (mut out, mut stdin, child) = start_bridge()?;
+        if !install_child(control, child)? {
+            return Ok(()); // raced with Drop
+        }
+        let result = pump_session(&mut out, &mut stdin, slot, poll_ms);
+        reap_child(control);
+        result
     }
+}
+
+impl Drop for LhmFeed {
+    fn drop(&mut self) {
+        // Stop the supervisor and kill the child so the blocked reader unblocks.
+        let mut c = match self.control.lock() {
+            Ok(c) => c,
+            Err(e) => e.into_inner(),
+        };
+        c.stop = true;
+        if let Some(mut child) = c.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// True when the feed has been dropped.
+fn is_stopped(control: &Arc<Mutex<Control>>) -> bool {
+    control.lock().map(|c| c.stop).unwrap_or(true)
+}
+
+/// Sleep `duration`, waking early when stopped. Returns false when stopped.
+fn backoff(control: &Arc<Mutex<Control>>, duration: Duration) -> bool {
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        if is_stopped(control) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(BACKOFF_POLL_MS));
+    }
+    !is_stopped(control)
 }
 
 /// Spawn the PowerShell bridge host with the DLL path as an argument.
@@ -112,6 +178,47 @@ fn bridge_streams(child: &mut Child) -> Result<(BufReader<ChildStdout>, ChildStd
     let out = BufReader::new(child.stdout.take().ok_or("no stdout")?);
     let stdin = child.stdin.take().ok_or("no stdin")?;
     Ok((out, stdin))
+}
+
+/// Spawn the bridge and take its pipes: `(stdout reader, stdin writer, child)`.
+fn start_bridge() -> Result<(BufReader<ChildStdout>, ChildStdin, Child), String> {
+    let mut child = spawn_bridge()?;
+    let (out, stdin) = bridge_streams(&mut child)?;
+    Ok((out, stdin, child))
+}
+
+/// Store the spawned child on the control, unless the feed was stopped meanwhile
+/// (then kill it and return false so the session ends without serving).
+fn install_child(control: &Arc<Mutex<Control>>, mut child: Child) -> Result<bool, String> {
+    let mut c = control.lock().map_err(|_| "control poisoned".to_string())?;
+    if c.stop {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Ok(false);
+    }
+    c.child = Some(child);
+    Ok(true)
+}
+
+/// Handshake, then serve sensor dumps until the child exits.
+fn pump_session(
+    out: &mut impl BufRead,
+    stdin: &mut impl Write,
+    slot: &LhmLatest,
+    poll_ms: u64,
+) -> Result<(), String> {
+    read_handshake(out)?;
+    tracing::info!("lhm bridge: serving");
+    pump(out, stdin, slot, poll_ms)
+}
+
+/// Reap and clear the child slot (it may already be gone if Drop took it).
+fn reap_child(control: &Arc<Mutex<Control>>) {
+    if let Ok(mut c) = control.lock() {
+        if let Some(mut ch) = c.child.take() {
+            let _ = ch.wait();
+        }
+    }
 }
 
 /// Read the bridge's two hello lines: a version banner, then `READY`.
@@ -147,8 +254,9 @@ fn pump(
     }
 }
 
-/// The sleep between bridge ticks (ms clamped to ≥1 so a `--bridge-ms 0` cannot
-/// busy-spin the sidecar). Pure, so the clamp is unit-tested.
+/// The sleep between bridge ticks (ms clamped to ≥1 so a `--hardware-poll 0`
+/// cannot busy-spin the sidecar). The tick comes from the hardware poll value.
+/// Pure, so the clamp is unit-tested.
 pub(crate) fn bridge_delay(poll_ms: u64) -> Duration {
     Duration::from_millis(poll_ms.max(1))
 }
@@ -210,6 +318,31 @@ mod tests {
         Arc::new(Mutex::new(None))
     }
 
+    /// A feed handle over `latest` with a fresh, empty control.
+    fn feed(latest: LhmLatest) -> LhmFeed {
+        LhmFeed {
+            latest,
+            control: Arc::new(Mutex::new(Control::default())),
+        }
+    }
+
+    /// A real, silent, long-lived child: it writes no output and keeps its
+    /// stdout pipe open, so a reader blocks on it — the "hung child" case.
+    fn silent_long_lived_child() -> Child {
+        Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 30",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn a silent powershell")
+    }
+
     const ONE_SENSOR: &str = r#"[{"hw":"Cpu:X","type":"Load","name":"CPU Total","value":42.0}]"#;
 
     #[test]
@@ -264,7 +397,7 @@ mod tests {
         // forever, so a dead bridge would never show `--`.
         let slot = empty_slot();
         store_sample(ONE_SENSOR, &slot);
-        let feed = LhmFeed { latest: slot };
+        let feed = feed(slot);
         assert!(
             feed.latest(Duration::from_secs(60)).is_some(),
             "a fresh sample is returned"
@@ -277,10 +410,48 @@ mod tests {
 
     #[test]
     fn bridge_delay_clamps_zero_and_keeps_a_normal_cadence() {
-        // Catches: a `--bridge-ms 0` busy-spinning the PowerShell sidecar (and
-        // the LHM hardware reads) at full tilt, or a valid value being ignored.
+        // Catches: a `--hardware-poll 0` busy-spinning the PowerShell sidecar
+        // (and the LHM hardware reads) at full tilt, or a valid value being
+        // ignored.
         assert_eq!(bridge_delay(0), Duration::from_millis(1));
         assert_eq!(bridge_delay(100), Duration::from_millis(100));
         assert_eq!(bridge_delay(500), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn dropping_the_feed_kills_the_child_and_unblocks_the_reader() {
+        // Catches: a persistent PowerShell child surviving minihud (an orphan)
+        // and a reader parked forever on its pipe — the exact resource-leak and
+        // infinite-wait failure this hardening fixes.
+        let mut child = silent_long_lived_child();
+        let mut stdout = child.stdout.take().expect("stdout");
+        let control = Arc::new(Mutex::new(Control {
+            stop: false,
+            child: Some(child),
+        }));
+        let feed = LhmFeed {
+            latest: empty_slot(),
+            control: control.clone(),
+        };
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut buf = [0u8; 1];
+            let n = std::io::Read::read(&mut stdout, &mut buf).unwrap_or(0);
+            let _ = tx.send(n);
+        });
+
+        drop(feed);
+
+        let n = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the kill must close the pipe and unblock the reader");
+        assert_eq!(n, 0, "a closed stdout must read as EOF");
+        reader.join().expect("reader thread");
+        assert!(is_stopped(&control), "drop must set the stop flag");
+        assert!(
+            control.lock().expect("control").child.is_none(),
+            "drop must reap the child out of the slot"
+        );
     }
 }

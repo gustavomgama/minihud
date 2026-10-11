@@ -17,9 +17,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::window::{FpsSource, FpsWindow};
+use crate::retry;
 
-/// Seconds before retrying a failed PresentMon session.
+/// Fixed backoff before retrying a failed PresentMon session.
 const RETRY_SECS: u64 = 5;
+/// Largest jitter applied to the backoff (so feeds do not retry in lockstep).
+const MAX_JITTER: Duration = Duration::from_millis(retry::MAX_JITTER_MS);
 /// A frame sample older than this reads as stale (`--`): no present for this
 /// long means the target is idle or gone.
 const SAMPLE_MAX_AGE: Duration = Duration::from_secs(2);
@@ -81,12 +84,17 @@ fn presentmon_path() -> Result<PathBuf, String> {
     }
 }
 
-/// Shared state: the rolling window plus the time of the newest sample (for the
-/// staleness gate).
+/// Shared state: the rolling window, the time of the newest sample (the
+/// staleness gate), and a monotonic sample sequence the follow loop watches to
+/// redraw only when a new frame arrived.
 #[derive(Default)]
 struct Shared {
     window: FpsWindow,
     updated: Option<Instant>,
+    /// Incremented once per recorded frametime. The follow loop compares it
+    /// between ticks and redraws only on a change, so the fps line updates per
+    /// frame instead of on a fixed timer.
+    seq: u64,
 }
 
 /// The running child plus the stop flag, so `Drop` can kill PresentMon and
@@ -125,6 +133,17 @@ impl PresentMonFeed {
             .map(|s| s.updated.is_some_and(|t| t.elapsed() < SAMPLE_MAX_AGE))
             .unwrap_or(false)
     }
+
+    /// The newest sample's sequence number, or `0` when no fresh sample exists
+    /// (stale or absent). [`read_frames`] bumps it once per recorded frametime,
+    /// so a changed return value means a new frame arrived: the follow loop
+    /// redraws only then, giving a per-frame readout instead of a timed one.
+    pub fn sample_seq(&self) -> u64 {
+        if !self.fresh() {
+            return 0;
+        }
+        self.shared.lock().map(|s| s.seq).unwrap_or(0)
+    }
 }
 
 impl FpsSource for PresentMonFeed {
@@ -158,34 +177,34 @@ impl Drop for PresentMonFeed {
     }
 }
 
-/// Run sessions for `pid` until stopped, backing off between failures.
+/// Run sessions for `pid` until stopped, backing off (with jitter) between
+/// failures.
 fn supervise(shared: &Arc<Mutex<Shared>>, control: &Arc<Mutex<Control>>, pid: u32) {
-    let mut logged = false;
+    let mut failures: u64 = 0;
+    let mut jitter = retry::Jitter::new(retry::seed_now(pid));
     while !is_stopped(control) {
+        let mut wait = Duration::from_secs(RETRY_SECS);
         if let Err(e) = session(shared, control, pid) {
             // A dropped feed kills the child, which surfaces here as an EOF
             // error; that is a clean stop, not a failure to report.
             if is_stopped(control) {
                 return;
             }
-            if !logged {
-                // Log the first failure loudly; anti-cheat blocking the ETW
-                // session is the common cause, and it must stay visible.
-                tracing::warn!("fps: presentmon: {e}; retry in {RETRY_SECS}s");
-                logged = true;
-            } else {
-                tracing::debug!("fps: presentmon: {e}; retry in {RETRY_SECS}s");
-            }
+            failures += 1;
+            let total = retry::FPS_RETRIES.bump();
+            wait = jitter.next(Duration::from_secs(RETRY_SECS), MAX_JITTER);
+            retry::emit_failure("fps: presentmon", &e, wait, failures, total);
         }
-        if !backoff(control) {
+        if !backoff(control, wait) {
             return;
         }
     }
 }
 
-/// Sleep [`RETRY_SECS`], waking early when stopped. Returns false when stopped.
-fn backoff(control: &Arc<Mutex<Control>>) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(RETRY_SECS);
+/// Sleep `duration` (a jittered backoff), waking early when stopped. Returns
+/// false when stopped.
+fn backoff(control: &Arc<Mutex<Control>>, duration: Duration) -> bool {
+    let deadline = Instant::now() + duration;
     while Instant::now() < deadline {
         if is_stopped(control) {
             return false;
@@ -275,6 +294,7 @@ fn read_frames(reader: &mut impl BufRead, shared: &Arc<Mutex<Shared>>) -> Result
             if let Ok(mut s) = shared.lock() {
                 s.window.record(ms);
                 s.updated = Some(Instant::now());
+                s.seq = s.seq.wrapping_add(1);
             }
         }
     }
@@ -322,6 +342,70 @@ mod tests {
     }
 
     #[test]
+    fn read_frames_bumps_the_sample_sequence_once_per_recorded_sample() {
+        // Catches: a seq that never changes (the redraw never fires) or one that
+        // changes on a skipped line (spurious redraws). The follow loop redraws
+        // only when this seq moves, so it must count real frametimes and nothing
+        // else.
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let csv = "Application,ProcessID,MsBetweenPresents\n\
+                   game,1,16.0\n\
+                   game,1,notanumber\n\
+                   game,1,8.0\n\
+                   short,line\n";
+        // EOF returns Err by design (the supervisor retries); only the seq matters.
+        let _ = read_frames(&mut std::io::Cursor::new(csv.as_bytes()), &shared);
+        let s = shared.lock().expect("lock");
+        assert_eq!(s.seq, 2, "only the two valid frametimes may bump the seq");
+        // A window shorter than one frame reads the newest sample (8 ms), so the
+        // last valid CSV row is the one recorded.
+        assert_eq!(
+            s.window.fps(1.0),
+            Some(125.0),
+            "newest sample must be 8.0 ms"
+        );
+    }
+
+    #[test]
+    fn sample_seq_is_zero_without_a_fresh_sample() {
+        // Catches: a stale/absent feed reporting a nonzero seq, which would make
+        // the redraw fire on data that is not there (and never settle to `--`).
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let feed = PresentMonFeed {
+            shared: shared.clone(),
+            control: Arc::new(Mutex::new(Control::default())),
+        };
+        assert_eq!(feed.sample_seq(), 0, "no sample means no sequence");
+        {
+            let mut s = shared.lock().expect("lock");
+            s.seq = 7;
+            s.updated = Some(
+                Instant::now()
+                    .checked_sub(Duration::from_secs(3))
+                    .expect("sub"),
+            );
+        }
+        assert_eq!(feed.sample_seq(), 0, "a stale sample reads as no sequence");
+    }
+
+    #[test]
+    fn sample_seq_reports_the_newest_sequence_while_fresh() {
+        // Catches: sample_seq returning 0 for a live feed (the redraw would never
+        // fire) or a value that does not track the recorded sample count.
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let feed = PresentMonFeed {
+            shared: shared.clone(),
+            control: Arc::new(Mutex::new(Control::default())),
+        };
+        {
+            let mut s = shared.lock().expect("lock");
+            s.seq = 3;
+            s.updated = Some(Instant::now());
+        }
+        assert_eq!(feed.sample_seq(), 3);
+    }
+
+    #[test]
     fn spawn_args_request_a_stdout_dump_for_the_pid() {
         // Catches: dropping `-output_stdout` (no CSV to parse) or
         // `-stop_existing_session` (a stale session blocks the capture), or
@@ -335,5 +419,29 @@ mod tests {
                 "-stop_existing_session"
             ]
         );
+    }
+
+    #[test]
+    fn backoff_wakes_immediately_when_stopped() {
+        // Catches: Drop waiting a full (now jittered) backoff before the
+        // supervisor notices the stop, keeping a killed feed's thread parked.
+        let c = Arc::new(Mutex::new(Control {
+            stop: true,
+            child: None,
+        }));
+        let t = Instant::now();
+        assert!(!backoff(&c, Duration::from_secs(30)), "stopped -> false");
+        assert!(
+            t.elapsed() < Duration::from_secs(1),
+            "a stopped feed must not sleep its backoff"
+        );
+    }
+
+    #[test]
+    fn backoff_returns_true_after_a_zero_wait_while_running() {
+        // Catches: a running feed's backoff reporting "stopped", which would end
+        // the supervisor and stop the retries.
+        let c = Arc::new(Mutex::new(Control::default()));
+        assert!(backoff(&c, Duration::ZERO), "running -> true");
     }
 }
