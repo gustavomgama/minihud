@@ -8,6 +8,7 @@
 pub mod config;
 pub mod layout;
 pub mod model;
+pub mod motion;
 pub mod theme;
 
 #[cfg(feature = "gui")]

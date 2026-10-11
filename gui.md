@@ -47,6 +47,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 7. [x] README/CHANGELOG; commit + push `gui`.
 8. [x] Polish: anchor/corner positioning, content-fit window size, `scale`,
    hairline, monospace figures, live FPS feed in GUI mode.
+9. [x] Motion: idle fade (`fade_idle_secs`) + change signature (`gui::motion`).
 
 ## Progress log
 
@@ -92,3 +93,10 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   not a capturable target (degrades gracefully). Real fps needs a game +
   staged PresentMon, not available headless. Gate green (169 tests, both feature
   sets).
+- 2026-10-11: `gui::motion` (TDD, 5 tests): `idle_opacity` (full until
+  `fade_idle_secs`, then a monotonic ramp to a 0.15 floor; 0 disables) and
+  `signature` (FNV over the drawn rows + fps + 1% low) for change detection.
+  The app tracks the last change, fades the panel (bg alpha + `ui.set_opacity`),
+  and repaints at 50 ms while animating, else 250 ms. **Smoke-tested live** with
+  `fade_idle_secs = 2`: the panel dims to the floor when idle. Gate green
+  (174 tests, both feature sets).

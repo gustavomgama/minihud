@@ -8,13 +8,14 @@
 //! it reads as an OSD over a game rather than a window.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 
 use super::config::Config;
 use super::layout;
 use super::model::{self, Metric};
+use super::motion;
 use super::theme::{self, Rgb};
 use crate::hw::HwStats;
 
@@ -50,6 +51,8 @@ pub fn run(cfg: Config, data: Arc<Mutex<Snapshot>>) -> eframe::Result<()> {
                 data,
                 placed: false,
                 last_h: -1.0,
+                last_sig: None,
+                last_change: Instant::now(),
             }))
         }),
     )
@@ -64,6 +67,10 @@ struct Overlay {
     /// The content height the window was last fitted to, so it is resized only
     /// when the measured content actually changes.
     last_h: f32,
+    /// The signature of the last drawn content, to detect change.
+    last_sig: Option<u64>,
+    /// When the content last changed (drives the idle fade).
+    last_change: Instant,
 }
 
 impl eframe::App for Overlay {
@@ -77,9 +84,22 @@ impl eframe::App for Overlay {
         let scale = self.cfg.scale;
 
         let snap = self.data.lock().map(|g| g.clone()).unwrap_or_default();
+        let rows = model::rows_for(self.cfg.density, &snap.stats);
+
+        // Idle fade: full while values move, dimmed once they settle.
+        let sig = motion::signature(&rows, snap.fps, snap.one_percent_low);
+        if self.last_sig != Some(sig) {
+            self.last_sig = Some(sig);
+            self.last_change = Instant::now();
+        }
+        let idle_for = self.last_change.elapsed().as_secs_f32();
+        let base = self.cfg.opacity.clamp(0.0, 1.0);
+        let faded = motion::idle_opacity(base, self.cfg.fade_idle_secs, idle_for);
+        let factor = if base > 0.0 { faded / base } else { 1.0 };
+
         let temp = snap.stats.gpu_temp_c.or(snap.stats.cpu_temp_c);
         let accent = to_color(theme::resolve_accent(self.cfg.accent, temp));
-        let alpha = (self.cfg.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let alpha = (faded * 255.0).round() as u8;
         let bg = egui::Color32::from_rgba_unmultiplied(10, 12, 16, alpha);
         let hairline = egui::Stroke::new(
             1.0,
@@ -92,10 +112,11 @@ impl eframe::App for Overlay {
             .inner_margin(egui::Margin::same((14.0 * scale) as i8))
             .corner_radius(egui::CornerRadius::same((12.0 * scale) as u8))
             .show(ui, |ui| {
+                ui.set_opacity(factor);
                 hero(ui, &snap, accent, scale);
                 ui.add_space(10.0 * scale);
-                for m in model::rows_for(self.cfg.density, &snap.stats) {
-                    row(ui, &m, scale);
+                for m in &rows {
+                    row(ui, m, scale);
                 }
             });
 
@@ -124,7 +145,9 @@ impl eframe::App for Overlay {
             }
         }
 
-        ctx.request_repaint_after(Duration::from_millis(250));
+        // Repaint faster while the fade is still animating.
+        let animating = factor < 0.999;
+        ctx.request_repaint_after(Duration::from_millis(if animating { 50 } else { 250 }));
     }
 }
 
