@@ -59,6 +59,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 10. [x] `cargo xtask --features <list>` so the documented overlay build works.
 11. [x] Value roll: FPS / 1% low / bars animate to new values (`animate_value_with_time`).
 12. [x] `--gui --match <glob>` targets a named exe instead of the foreground.
+13. [x] Quit hotkey: Ctrl+Alt+H closes the click-through overlay (`RegisterHotKey`).
 
 ## Progress log
 
@@ -132,3 +133,10 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   always followed the foreground; `Mode::Gui` now carries the glob, threaded to
   `fps_loop` → `resolve_follow_target`. Help + README updated. Smoke-tested:
   starts clean with `--match`. Gate green (176 tests, both feature sets).
+- 2026-10-11: Quit hotkey (item 13). The overlay is click-through with no taskbar
+  entry, so there was no way to close it. `spawn_quit_hotkey` registers
+  Ctrl+Alt+H (`RegisterHotKey`, dedicated `GetMessageW` thread) → sets a flag →
+  `app::run` sends `ViewportCommand::Close`. Added the
+  `Win32_UI_Input_KeyboardAndMouse` windows feature. **Verified end-to-end**: the
+  log shows the hotkey registered, and a synthesized Ctrl+Alt+H closed the
+  process. Gate green (176 tests, both feature sets).

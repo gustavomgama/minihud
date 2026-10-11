@@ -13,6 +13,8 @@
   unknown keys error. See `minihud.toml.example`.
 - **Thermal accent.** The accent hue drifts cool→warm with temperature; load bars
   run calm → amber → alarm.
+- **Quit hotkey.** The overlay is click-through with no taskbar entry; press
+  **Ctrl+Alt+H** to close it.
 
 ## 1.0.0
 

@@ -189,6 +189,8 @@ fn run_gui(
     let cfg = gui::config::resolve();
     let data = Arc::new(std::sync::Mutex::new(gui::app::Snapshot::default()));
     let stop = Arc::new(AtomicBool::new(false));
+    let quit = Arc::new(AtomicBool::new(false));
+    spawn_quit_hotkey(quit.clone());
 
     let hw_worker = {
         let data = data.clone();
@@ -212,7 +214,7 @@ fn run_gui(
         std::thread::spawn(move || fps_loop(&data, &stop, fps_opts, match_glob))
     };
 
-    let result = gui::app::run(cfg, data);
+    let result = gui::app::run(cfg, data, quit);
     stop.store(true, Ordering::SeqCst);
     let _ = hw_worker.join();
     let _ = fps_worker.join();
@@ -285,6 +287,45 @@ fn run_gui(
 ) -> std::result::Result<(), String> {
     tracing::error!("--gui requires a build with the `gui` feature (cargo build --features gui)");
     std::process::exit(2);
+}
+
+/// Register a global quit hotkey (Ctrl+Alt+H) and set `quit` when it fires, so
+/// a click-through overlay with no taskbar entry can still be closed.
+#[cfg(feature = "gui")]
+fn spawn_quit_hotkey(quit: Arc<AtomicBool>) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, VK_H,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
+
+    /// Arbitrary id for the single hotkey this process registers.
+    const HOTKEY_ID: i32 = 1;
+
+    std::thread::spawn(move || {
+        // SAFETY: a null window posts WM_HOTKEY to this thread's queue, which the
+        // loop below drains. The arguments are plain values.
+        let registered = unsafe {
+            RegisterHotKey(
+                None,
+                HOTKEY_ID,
+                MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
+                VK_H.0 as u32,
+            )
+        };
+        if let Err(e) = registered {
+            tracing::warn!("overlay: could not register the Ctrl+Alt+H quit hotkey: {e}");
+            return;
+        }
+        tracing::info!("overlay: press Ctrl+Alt+H to close");
+        let mut msg = MSG::default();
+        // SAFETY: `msg` is a valid, writable MSG; the loop stops on WM_QUIT (0).
+        while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+            if msg.message == WM_HOTKEY {
+                quit.store(true, Ordering::SeqCst);
+                return;
+            }
+        }
+    });
 }
 
 /// Poll the hardware sensors at the configured cadence and update the status

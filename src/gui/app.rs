@@ -7,6 +7,7 @@
 //! The window is transparent, undecorated, always-on-top and click-through, so
 //! it reads as an OSD over a game rather than a window.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -32,8 +33,9 @@ pub struct Snapshot {
     pub one_percent_low: Option<f64>,
 }
 
-/// Launch the overlay. Blocks until the window is closed.
-pub fn run(cfg: Config, data: Arc<Mutex<Snapshot>>) -> eframe::Result<()> {
+/// Launch the overlay. Blocks until the window is closed. `quit` is set by an
+/// external signal (the quit hotkey) to close the window.
+pub fn run(cfg: Config, data: Arc<Mutex<Snapshot>>, quit: Arc<AtomicBool>) -> eframe::Result<()> {
     let size = layout::content_size(cfg.density, cfg.scale);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -57,6 +59,7 @@ pub fn run(cfg: Config, data: Arc<Mutex<Snapshot>>) -> eframe::Result<()> {
                 last_h: -1.0,
                 last_sig: None,
                 last_change: Instant::now(),
+                quit,
             }))
         }),
     )
@@ -75,6 +78,8 @@ struct Overlay {
     last_sig: Option<u64>,
     /// When the content last changed (drives the idle fade).
     last_change: Instant,
+    /// Set by the quit hotkey; when true the window closes.
+    quit: Arc<AtomicBool>,
 }
 
 impl eframe::App for Overlay {
@@ -86,6 +91,10 @@ impl eframe::App for Overlay {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let scale = self.cfg.scale;
+
+        if self.quit.load(Ordering::SeqCst) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
 
         let snap = self.data.lock().map(|g| g.clone()).unwrap_or_default();
         let rows = model::rows_for(self.cfg.density, &snap.stats);

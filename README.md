@@ -189,6 +189,9 @@ density (`zen` / `standard` / `full`), corner `anchor`, `margin_px`, `opacity`,
 `scale`, `accent` (thermal gradient or a fixed hue), `poll_ms`, `fade_idle_secs`.
 No file = sensible defaults; out-of-range numbers clamp; unknown keys error.
 
+The overlay is click-through with no taskbar entry — press **Ctrl+Alt+H** to
+close it.
+
 ## Project layout
 
 ```text
