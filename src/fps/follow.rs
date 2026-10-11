@@ -29,14 +29,38 @@ pub enum FeedAction {
     Keep,
 }
 
-/// Decide the feed's next action from the selected pid and the current one.
+/// Polls a candidate selection must persist before the feed acts on it: a
+/// momentary foreground flip (a console stealing focus, an alt-tab) is ridden
+/// out instead of tearing down and respawning the ETW session. At the default
+/// 500 ms `--fps-poll` this is ~1.5 s.
+pub const STABLE_TICKS: u32 = 3;
+
+/// Debounce state for [`feed_action`]: the selection seen last poll and how many
+/// consecutive polls it has now held.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FeedState {
+    candidate: Option<u32>,
+    ticks: u32,
+}
+
+/// Decide the feed's next action from the debounced selection.
 ///
-/// The same pid is a no-op (never restart PresentMon on every tick); a different
-/// selected pid is a retarget; a dropped selection with one running is a stop.
-pub fn feed_action(selected: Option<u32>, current: u32) -> FeedAction {
+/// A selection is only acted on once it has held for [`STABLE_TICKS`] polls, so
+/// a brief target loss or a brief retarget is a no-op: the feed — and the
+/// PresentMon child it owns — is left running. The one exception is the first
+/// target, which starts immediately (with no feed running there is nothing to
+/// churn, and waiting would just delay the first frame).
+pub fn feed_action(state: &mut FeedState, selected: Option<u32>, current: u32) -> FeedAction {
+    state.ticks = if selected == state.candidate {
+        state.ticks.saturating_add(1)
+    } else {
+        1
+    };
+    state.candidate = selected;
+    let stable = state.ticks >= STABLE_TICKS;
     match selected {
-        Some(pid) if pid != current => FeedAction::Start,
-        None if current != 0 => FeedAction::Stop,
+        Some(pid) if pid != current && (current == 0 || stable) => FeedAction::Start,
+        None if current != 0 && stable => FeedAction::Stop,
         _ => FeedAction::Keep,
     }
 }
@@ -130,6 +154,7 @@ pub fn run(match_glob: Option<String>, secs: Option<u64>, opts: FpsOpts) -> Resu
 
     let deadline = follow_deadline(Instant::now(), secs);
     let mut feed: Option<PresentMonFeed> = None;
+    let mut feed_state = FeedState::default();
     let mut current: u32 = 0;
     let mut label = String::new();
     let mut next_poll = Instant::now();
@@ -142,7 +167,11 @@ pub fn run(match_glob: Option<String>, secs: Option<u64>, opts: FpsOpts) -> Resu
         if Instant::now() >= next_poll {
             next_poll = Instant::now() + poll;
             let selected = select(own, &match_glob, opts.pid.as_deref());
-            match feed_action(selected.as_ref().map(|(pid, _)| *pid), current) {
+            match feed_action(
+                &mut feed_state,
+                selected.as_ref().map(|(pid, _)| *pid),
+                current,
+            ) {
                 FeedAction::Start => {
                     if let Some((pid, exe)) = selected {
                         log_once(&mut last_status, format!("target={exe} (pid {pid})"));
@@ -391,14 +420,74 @@ mod tests {
     }
 
     #[test]
-    fn feed_action_starts_stops_and_keeps() {
-        // Catches: restarting PresentMon every tick for an unchanged pid, never
-        // retargeting when the pid changes, or leaving a feed running after the
-        // target is gone.
-        assert_eq!(feed_action(Some(5), 0), FeedAction::Start);
-        assert_eq!(feed_action(Some(5), 5), FeedAction::Keep);
-        assert_eq!(feed_action(None, 0), FeedAction::Keep);
-        assert_eq!(feed_action(None, 5), FeedAction::Stop);
-        assert_eq!(feed_action(Some(9), 5), FeedAction::Start);
+    fn feed_action_starts_a_first_target_immediately() {
+        // Catches: making the initial Start wait for the debounce. With no feed
+        // running there is nothing to churn, so the first target must start on
+        // the spot rather than after STABLE_TICKS polls.
+        let mut s = FeedState::default();
+        assert_eq!(feed_action(&mut s, Some(5), 0), FeedAction::Start);
+    }
+
+    #[test]
+    fn feed_action_keeps_an_unchanged_target() {
+        // Catches: restarting PresentMon every tick for an unchanged pid (the
+        // ETW session would be torn down and rebuilt on every poll).
+        let mut s = FeedState::default();
+        for _ in 0..5 {
+            assert_eq!(feed_action(&mut s, Some(5), 5), FeedAction::Keep);
+        }
+    }
+
+    #[test]
+    fn feed_action_keeps_when_nothing_is_selected_and_nothing_runs() {
+        // Catches: emitting a Stop with no feed running (the loop would log a
+        // spurious "target gone" and clear the status line every tick).
+        let mut s = FeedState::default();
+        assert_eq!(feed_action(&mut s, None, 0), FeedAction::Keep);
+    }
+
+    #[test]
+    fn feed_action_rides_out_a_brief_target_loss() {
+        // Catches: stopping PresentMon the instant the foreground flips to
+        // nothing (a console stealing focus, an alt-tab). Observed live as 14
+        // PresentMon spawns in 15 min, most under a second. A loss shorter than
+        // the debounce must not tear the feed down, and finding the target again
+        // must not restart it either.
+        let mut s = FeedState::default();
+        assert_eq!(feed_action(&mut s, None, 5), FeedAction::Keep);
+        assert_eq!(feed_action(&mut s, Some(5), 5), FeedAction::Keep);
+    }
+
+    #[test]
+    fn feed_action_stops_after_a_persistent_loss() {
+        // Catches: never stopping (a dead target would hold an ETW session for
+        // the rest of the run). The stop lands once the loss has persisted
+        // STABLE_TICKS polls, and only then.
+        let mut s = FeedState::default();
+        for _ in 1..STABLE_TICKS {
+            assert_eq!(feed_action(&mut s, None, 5), FeedAction::Keep);
+        }
+        assert_eq!(feed_action(&mut s, None, 5), FeedAction::Stop);
+    }
+
+    #[test]
+    fn feed_action_rides_out_a_brief_retarget() {
+        // Catches: churning PresentMon when the foreground flickers to another
+        // window between two polls of the game (Firefox <-> Deadlock in the live
+        // log). A single-poll blip must not retarget the feed.
+        let mut s = FeedState::default();
+        assert_eq!(feed_action(&mut s, Some(9), 5), FeedAction::Keep);
+        assert_eq!(feed_action(&mut s, Some(5), 5), FeedAction::Keep);
+    }
+
+    #[test]
+    fn feed_action_retargets_after_a_persistent_switch() {
+        // Catches: refusing to follow a genuine target change (the feed would
+        // stay pinned to the old window forever). A sustained new pid retargets.
+        let mut s = FeedState::default();
+        for _ in 1..STABLE_TICKS {
+            assert_eq!(feed_action(&mut s, Some(9), 5), FeedAction::Keep);
+        }
+        assert_eq!(feed_action(&mut s, Some(9), 5), FeedAction::Start);
     }
 }
