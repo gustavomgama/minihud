@@ -58,6 +58,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
 9. [x] Motion: idle fade (`fade_idle_secs`) + change signature (`gui::motion`).
 10. [x] `cargo xtask --features <list>` so the documented overlay build works.
 11. [x] Value roll: FPS / 1% low / bars animate to new values (`animate_value_with_time`).
+12. [x] `--gui --match <glob>` targets a named exe instead of the foreground.
 
 ## Progress log
 
@@ -127,3 +128,7 @@ An OSD that looks like a piece of lab equipment, not a widget. Rules:
   have failed**. Excluded `src/gui/app.rs` from CRAP in `tools/critic.ps1` and
   `.github/workflows/audit.yml`, alongside the entry point. Re-ran: CRAP ✓ (0
   exceed), jscpd ✓ (0.73%), cargo-machete ✓.
+- 2026-10-11: `--gui --match <glob>` (TDD). The overlay ignored `--match` and
+  always followed the foreground; `Mode::Gui` now carries the glob, threaded to
+  `fps_loop` → `resolve_follow_target`. Help + README updated. Smoke-tested:
+  starts clean with `--match`. Gate green (176 tests, both feature sets).

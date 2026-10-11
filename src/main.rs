@@ -73,10 +73,10 @@ fn main() -> Result<()> {
             Ok(())
         }
         // The OSD overlay window (feature `gui`).
-        Mode::Gui => {
+        Mode::Gui(match_glob) => {
             ensure_elevated();
             let fps_opts = fps::parse_fps_opts(&args);
-            report("--gui", run_gui(hw, fps_opts))
+            report("--gui", run_gui(hw, fps_opts, match_glob))
         }
         // Default: follow the foreground process (or `--match`), showing fps +
         // hardware stats on the same line. `--fps-poll` drives the target poll.
@@ -130,14 +130,15 @@ fn parse_hw_opts(args: &[String]) -> HwOpts {
 enum Mode {
     StatsOnly,
     Follow(hook::follow::FollowArgs),
-    Gui,
+    /// The overlay, carrying the optional `--match` glob it should follow.
+    Gui(Option<String>),
 }
 
 /// Resolve the run mode: `--gui` wins, then `--stats-only`, else the default
 /// `--follow`.
 fn select_mode(args: &[String]) -> Mode {
     if args.iter().any(|a| a == "--gui") {
-        return Mode::Gui;
+        return Mode::Gui(hook::follow::parse_follow(args).and_then(|f| f.match_glob));
     }
     if args.iter().any(|a| a == "--stats-only") {
         return Mode::StatsOnly;
@@ -180,7 +181,11 @@ where
 /// threads, and paint the window on this (the main) thread, which the windowing
 /// system requires.
 #[cfg(feature = "gui")]
-fn run_gui(hw: HwOpts, fps_opts: fps::FpsOpts) -> std::result::Result<(), String> {
+fn run_gui(
+    hw: HwOpts,
+    fps_opts: fps::FpsOpts,
+    match_glob: Option<String>,
+) -> std::result::Result<(), String> {
     let cfg = gui::config::resolve();
     let data = Arc::new(std::sync::Mutex::new(gui::app::Snapshot::default()));
     let stop = Arc::new(AtomicBool::new(false));
@@ -204,7 +209,7 @@ fn run_gui(hw: HwOpts, fps_opts: fps::FpsOpts) -> std::result::Result<(), String
     let fps_worker = {
         let data = data.clone();
         let stop = stop.clone();
-        std::thread::spawn(move || fps_loop(&data, &stop, fps_opts))
+        std::thread::spawn(move || fps_loop(&data, &stop, fps_opts, match_glob))
     };
 
     let result = gui::app::run(cfg, data);
@@ -219,7 +224,12 @@ fn run_gui(hw: HwOpts, fps_opts: fps::FpsOpts) -> std::result::Result<(), String
 /// the console output; the debounce and target resolution are the same tested
 /// helpers.
 #[cfg(feature = "gui")]
-fn fps_loop(data: &std::sync::Mutex<gui::app::Snapshot>, stop: &AtomicBool, opts: fps::FpsOpts) {
+fn fps_loop(
+    data: &std::sync::Mutex<gui::app::Snapshot>,
+    stop: &AtomicBool,
+    opts: fps::FpsOpts,
+    match_glob: Option<String>,
+) {
     use fps::follow::{feed_action, resolve_follow_target, FeedAction, FeedState};
     use fps::presentmon::PresentMonFeed;
     use fps::window::FpsSource;
@@ -235,7 +245,7 @@ fn fps_loop(data: &std::sync::Mutex<gui::app::Snapshot>, stop: &AtomicBool, opts
         if Instant::now() >= next {
             next = Instant::now() + poll;
             let selected = if opts.enabled {
-                resolve_follow_target(own, &None, opts.pid.as_deref())
+                resolve_follow_target(own, &match_glob, opts.pid.as_deref())
             } else {
                 None
             };
@@ -268,7 +278,11 @@ fn fps_loop(data: &std::sync::Mutex<gui::app::Snapshot>, stop: &AtomicBool, opts
 
 /// `--gui` needs the crate built with `--features gui`.
 #[cfg(not(feature = "gui"))]
-fn run_gui(_hw: HwOpts, _fps_opts: fps::FpsOpts) -> std::result::Result<(), String> {
+fn run_gui(
+    _hw: HwOpts,
+    _fps_opts: fps::FpsOpts,
+    _match_glob: Option<String>,
+) -> std::result::Result<(), String> {
     tracing::error!("--gui requires a build with the `gui` feature (cargo build --features gui)");
     std::process::exit(2);
 }
@@ -467,7 +481,7 @@ fn usage() -> String {
          USAGE:\n\
          \x20   minihud                                  show the foreground target's fps + hardware stats (default)\n\
          \x20   minihud --stats-only                     print hardware stats only (no fps)\n\
-         \x20   minihud --gui                            show the OSD overlay window (needs --features gui)\n\
+         \x20   minihud --gui [--match <glob>]           show the OSD overlay window (needs --features gui)\n\
          \x20   minihud --follow [--match <glob>] [--follow-secs <n>]\n\
          \x20   minihud -h | --help                      print this help\n\
          \n\
@@ -489,7 +503,7 @@ fn usage() -> String {
          \x20   --follow                   follow the foreground target (or --match) and show its\n\
          \x20                              fps via ETW (needs elevation for ETW). This is the DEFAULT;\n\
          \x20                              Ctrl+C to stop.\n\
-         \x20   --match <glob>             with --follow, target an exe by case-insensitive glob\n\
+         \x20   --match <glob>             with --follow or --gui, target an exe by case-insensitive glob\n\
          \x20                              instead of the foreground process (e.g. deadlock*.exe).\n\
          \x20   --follow-secs <n>          with --follow, stop after <n> seconds (default: until Ctrl+C).\n\
          \x20   --hardware-poll <n>        hardware-stats poll cadence in ms (default {hw_poll}). One\n\
@@ -517,8 +531,20 @@ mod tests {
         // Catches: `--gui` being ignored (the overlay never launches) or losing
         // to `--stats-only` when both are passed.
         let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(select_mode(&a(&["--gui"])), Mode::Gui);
-        assert_eq!(select_mode(&a(&["--gui", "--stats-only"])), Mode::Gui);
+        assert_eq!(select_mode(&a(&["--gui"])), Mode::Gui(None));
+        assert_eq!(select_mode(&a(&["--gui", "--stats-only"])), Mode::Gui(None));
+    }
+
+    #[test]
+    fn gui_carries_a_match_glob() {
+        // Catches: `--gui --match <glob>` silently ignoring the glob (the
+        // overlay would follow the foreground instead of the named target).
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            select_mode(&a(&["--gui", "--match", "deadlock*.exe"])),
+            Mode::Gui(Some("deadlock*.exe".to_string()))
+        );
+        assert_eq!(select_mode(&a(&["--gui"])), Mode::Gui(None));
     }
 
     #[test]

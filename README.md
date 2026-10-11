@@ -181,6 +181,7 @@ RAM. It is **off by default** so the headless build stays lean.
 ```powershell
 cargo build --features gui        # or: cargo xtask build --features gui
 target\debug\minihud.exe --gui
+target\debug\minihud.exe --gui --match deadlock*.exe   # follow a named target
 ```
 
 Configured entirely by an optional `minihud.toml` (see `minihud.toml.example`):
