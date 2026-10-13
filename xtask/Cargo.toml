@@ -1,0 +1,10 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Dependency-free build/stage/ship helper for minihud"
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"

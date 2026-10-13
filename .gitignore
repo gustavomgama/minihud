@@ -1,0 +1,10 @@
+/target
+/dist/
+*.dll
+minihud.toml
+/coverage-report/
+*.profraw
+lcov.info
+/report/
+.opencode/opencode-loop/
+/nul

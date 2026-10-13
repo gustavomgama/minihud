@@ -1,0 +1,4 @@
+# `cargo xtask <cmd>` runs this workspace's xtask: a dependency-free,
+# std-only helper that builds `minihud` and stages its runtime assets.
+[alias]
+xtask = "run --package xtask --"

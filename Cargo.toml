@@ -1,0 +1,36 @@
+[workspace]
+members = [
+    ".",
+    "xtask",
+]
+
+[package]
+name = "minihud"
+version = "1.0.0"
+edition = "2021"
+authors = ["minihud"]
+description = "Headless LibreHardwareMonitor hardware-stats backend for Windows"
+license = "MIT"
+repository = "https://github.com/helmet/minihud"
+readme = "README.md"
+
+[dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dependencies.windows]
+version = "0.61"
+features = [
+  "Win32_Foundation",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_System_Console",
+]
+
+# Behavior-neutral release tuning only. Panic strategy is intentionally left
+# at the default so debug and release fail identically.
+[profile.release]
+strip = true
+lto = "thin"
