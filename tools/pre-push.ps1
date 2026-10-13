@@ -6,6 +6,13 @@
 # Wired in automatically through .githooks/pre-push; one-time setup per clone:
 #   git config core.hooksPath .githooks
 #
+# The gate checks the tree that will actually be PUSHED: `git push` ships
+# commits, never the working tree, so the checks run in a throwaway worktree at
+# HEAD (build cache shared with the main target dir, so it costs ~a minute, not
+# a cold build). An uncommitted fix in the working tree therefore cannot make a
+# red HEAD pass - that is exactly how a red fmt slipped past the first version
+# of this gate.
+#
 # Fail-fast: the first failing step exits 1 and the push is blocked. Advisory
 # reports (rustqual, mete) are CI's continue-on-error extras and are not run
 # here - the gate stays a couple of minutes, not a quarter hour.
@@ -13,7 +20,8 @@
 param()
 
 $ErrorActionPreference = 'Continue'
-Set-Location (Join-Path $PSScriptRoot '..')
+$repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+Set-Location $repo
 
 # No silent passes: a missing tool must fail loudly here, not let a later step
 # inherit a stale $LASTEXITCODE.
@@ -28,6 +36,18 @@ if ($missing) {
     exit 1
 }
 
+# Share the build cache so the throwaway worktree re-checks instead of
+# recompiling everything.
+$env:CARGO_TARGET_DIR = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $repo 'target' }
+
+$wt = Join-Path $env:TEMP ("minihud-prepush-{0}" -f $PID)
+if (Test-Path $wt) { Remove-Item -Recurse -Force $wt }
+git worktree add --detach $wt HEAD | Out-Null
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $wt)) {
+    Write-Host 'pre-push: could not stage a HEAD worktree; refusing to push blind' -ForegroundColor Red
+    exit 1
+}
+
 function Invoke-Step {
     param([string]$Name, [scriptblock]$Body)
     Write-Host "== $Name ==" -ForegroundColor Cyan
@@ -38,15 +58,23 @@ function Invoke-Step {
     }
 }
 
-Invoke-Step 'fmt'         { cargo fmt --all -- --check }
-Invoke-Step 'clippy'      { cargo clippy --workspace --all-targets -- -D warnings }
-Invoke-Step 'test'        { cargo nextest run --workspace --no-tests=pass }
-Invoke-Step 'machete'     { cargo machete }
-Invoke-Step 'deny'        { cargo deny check }
-Invoke-Step 'audit'       { cargo audit }
-Invoke-Step 'coverage'    { cargo llvm-cov --workspace --lcov --output-path lcov.info }
-Invoke-Step 'crap'        { cargo crap --lcov lcov.info --exclude 'src/main.rs' --exclude 'build.rs' --exclude 'xtask/**' --allow 'run' --allow 'session' --threshold 30 --fail-above }
-Invoke-Step 'duplication' { jscpd src --min-lines 5 --threshold 5 }
+try {
+    Set-Location $wt
+    Invoke-Step 'fmt'         { cargo fmt --all -- --check }
+    Invoke-Step 'clippy'      { cargo clippy --workspace --all-targets -- -D warnings }
+    Invoke-Step 'test'        { cargo nextest run --workspace --no-tests=pass }
+    Invoke-Step 'machete'     { cargo machete }
+    Invoke-Step 'deny'        { cargo deny check }
+    Invoke-Step 'audit'       { cargo audit }
+    Invoke-Step 'coverage'    { cargo llvm-cov --workspace --lcov --output-path lcov.info }
+    Invoke-Step 'crap'        { cargo crap --lcov lcov.info --exclude 'src/main.rs' --exclude 'build.rs' --exclude 'xtask/**' --allow 'run' --allow 'session' --threshold 30 --fail-above }
+    Invoke-Step 'duplication' { jscpd src --min-lines 5 --threshold 5 }
+}
+finally {
+    Set-Location $repo
+    git worktree remove --force $wt | Out-Null
+    git worktree prune | Out-Null
+}
 
 Write-Host 'pre-push: PASS' -ForegroundColor Green
 exit 0

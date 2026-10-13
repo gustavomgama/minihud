@@ -12,9 +12,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use windows::core::{Result, PCWSTR};
+use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::UI::Shell::{IsUserAnAdmin, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-use windows::Win32::System::Console::SetConsoleCtrlHandler;
 
 /// Default tracing filter: everything at `info`. Overridable with `RUST_LOG`.
 const DEFAULT_LOG_FILTER: &str = "info";
@@ -429,9 +429,15 @@ mod tests {
         // Catches: Ctrl+C leaving the poll loop running, so the LHM feed is
         // never dropped and its PowerShell child survives the process.
         RUNNING.store(true, Ordering::SeqCst);
-        assert!(RUNNING.load(Ordering::SeqCst), "the loop starts out running");
+        assert!(
+            RUNNING.load(Ordering::SeqCst),
+            "the loop starts out running"
+        );
         let _ = unsafe { ctrl_handler(0) };
-        assert!(!RUNNING.load(Ordering::SeqCst), "Ctrl+C must ask the poll loop to stop");
+        assert!(
+            !RUNNING.load(Ordering::SeqCst),
+            "Ctrl+C must ask the poll loop to stop"
+        );
         RUNNING.store(true, Ordering::SeqCst);
     }
 
