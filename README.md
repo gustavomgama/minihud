@@ -261,6 +261,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace --no-tests=pass
 ```
 
+**Push gate** — every `git push` first runs the full CI check set locally
+(`tools/pre-push.ps1`); a failing check blocks the push, so CI never reds a push
+from your machine. One-time setup per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
 Tooling used here: `cargo-nextest` (test runner), `bacon` (watch/rebuild),
 `cargo-deny` (`deny.toml`) and `cargo-audit` (dependency health),
 `cargo-llvm-cov` (coverage), `cargo-crap`, `cargo-mutants`, `cargo-expand`,

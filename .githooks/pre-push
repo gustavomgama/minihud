@@ -1,0 +1,6 @@
+#!/bin/sh
+# Local gate before every push: runs tools/pre-push.ps1 (the same hard checks
+# .github/workflows/audit.yml runs) and blocks the push when any of them fail.
+# One-time setup per clone: git config core.hooksPath .githooks
+root=$(git rev-parse --show-toplevel) || exit 1
+exec powershell -NoProfile -ExecutionPolicy Bypass -File "$root/tools/pre-push.ps1"

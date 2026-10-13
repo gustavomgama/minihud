@@ -35,19 +35,36 @@ jobs:
         with:
           tool: cargo-nextest,cargo-deny,cargo-audit,cargo-machete,cargo-llvm-cov
 
-      - name: Install tools (cargo install)
+      - name: Install quality tools (pinned)
+        # Versions pinned to the ones the local pre-push gate runs, so CI and
+        # local never drift. Binaries restored from the Swatinem cache-bin cache
+        # are skipped; a transient registry failure is retried instead of
+        # redding the job (that unpinned-install flake is what broke this step).
+        # Gate tools (cargo-crap, jscpd) must install; the advisory tools
+        # (rustqual, mete) only warn — their steps are continue-on-error anyway.
         shell: pwsh
         run: |
-          $tools = @{
-            'cargo-crap' = 'cargo-crap'
-            'rustqual'   = 'rustqual'
-            'mete'       = 'mete'
-            'jscpd'      = 'jscpd-rs'
-          }
-          foreach ($cmd in $tools.Keys) {
-            if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
-              cargo install $($tools[$cmd])
+          $gates = @{ 'cargo-crap' = 'cargo-crap@0.6.1'; 'jscpd' = 'jscpd-rs@0.1.12' }
+          $advisory = @{ 'rustqual' = 'rustqual@1.8.3'; 'mete' = 'mete@0.1.2' }
+          $failed = @()
+          foreach ($map in @($gates, $advisory)) {
+            foreach ($cmd in $map.Keys) {
+              if (Get-Command $cmd -ErrorAction SilentlyContinue) { continue }
+              $ok = $false
+              foreach ($attempt in 1..3) {
+                cargo install $($map[$cmd])
+                if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+                Write-Host "install $cmd failed (attempt $attempt of 3)"
+                Start-Sleep -Seconds 20
+              }
+              if (-not $ok) { $failed += $cmd }
             }
+          }
+          foreach ($cmd in $gates.Keys) {
+            if ($failed -contains $cmd) { throw "gate tool install failed: $cmd" }
+          }
+          foreach ($cmd in $advisory.Keys) {
+            if ($failed -contains $cmd) { Write-Host "::warning::advisory tool $cmd not installed; its report is skipped" }
           }
 
       - name: fmt
@@ -72,11 +89,11 @@ jobs:
         run: cargo llvm-cov --workspace --lcov --output-path lcov.info
 
       - name: CRAP gate (cargo-crap)
-        # Excludes the entry point / build script / xtask / the feature-gated GUI
-        # glue (egui painting, no in-process test); allows the tier-0 ETW live-only
-        # functions that only run against a real PresentMon child (no in-process
-        # test can exercise them).
-        run: cargo crap --lcov lcov.info --exclude 'src/main.rs' --exclude 'build.rs' --exclude 'xtask/**' --exclude 'src/gui/app.rs' --allow 'run' --allow 'read_frames' --allow 'session' --allow 'supervise' --threshold 30 --fail-above
+        # Scores the shipped product code: excludes the entry point, the build
+        # script and xtask. `--allow` hides the LHM bridge's live-only
+        # supervisor functions (`run`/`session`) — they only run against a real
+        # PowerShell child, so no in-process unit test can cover them.
+        run: cargo crap --lcov lcov.info --exclude 'src/main.rs' --exclude 'build.rs' --exclude 'xtask/**' --allow 'run' --allow 'session' --threshold 30 --fail-above
 
       - name: duplication gate (jscpd)
         run: jscpd src --min-lines 5 --threshold 5

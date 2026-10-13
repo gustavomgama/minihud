@@ -30,18 +30,12 @@ Invoke-Step 'machete'     { cargo machete }
 Invoke-Step 'deny'        { cargo deny check }
 Invoke-Step 'audit'       { cargo audit }
 Invoke-Step 'coverage'    { cargo llvm-cov --workspace --lcov --output-path lcov.info }
-# CRAP scores shipped product code. `--exclude` drops the entry point, build
-# script, xtask, the feature-gated GUI glue (`src/gui/app.rs` — egui painting
-# with no in-process test), and the two in-frame overlay WIP crates
-# (`overlay_host/**`, `overlay_loader/**` — the OSD renderer is a faithful port
-# of a decompiled renderer whose layout walk is a single high-complexity
-# function that cannot satisfy the threshold by construction). `--allow` hides
-# the tier-0 ETW live-only functions that only run against a real PresentMon
-# child (`run`/`read_frames`/`session`/`supervise`/`run_session`/
-# `session_scan`/`on_event`) — no in-process unit test can exercise them, so a
-# complex-but-0%-covered function must not red the gate. Everything else is in
-# scope.
-Invoke-Step 'crap'        { cargo crap --lcov lcov.info --exclude 'src/main.rs' --exclude 'build.rs' --exclude 'xtask/**' --exclude 'src/gui/app.rs' --exclude 'overlay_host/**' --exclude 'overlay_loader/**' --allow 'run' --allow 'read_frames' --allow 'session' --allow 'supervise' --allow 'run_session' --allow 'session_scan' --allow 'on_event' --threshold 30 --fail-above }
+# CRAP scores shipped product code. `--exclude` drops the entry point, the build
+# script and xtask. `--allow` hides the LHM bridge's live-only supervisor
+# functions (`run`/`session`) — they only run against a real PowerShell child,
+# so no in-process unit test can exercise them. These are the same flags
+# .github/workflows/audit.yml runs; keep the two in sync.
+Invoke-Step 'crap'        { cargo crap --lcov lcov.info --exclude 'src/main.rs' --exclude 'build.rs' --exclude 'xtask/**' --allow 'run' --allow 'session' --threshold 30 --fail-above }
 Invoke-Step 'duplication' { jscpd src --min-lines 5 --threshold 5 }
 
 Write-Host '== rustqual (advisory) ==' -ForegroundColor Cyan
