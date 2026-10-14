@@ -64,9 +64,21 @@ never blocks on it and keeps the last good sample until it goes stale.
 
 ```text
 powershell  lhm-bridge.ps1  ->  LhmFeed (thread)  ->  HwPoller  ->  stdout
-   |              |
-   |              +-- LibreHardwareMonitorLib.dll
-   +-- stdin "\n" ticks, stdout JSON
+    |              |
+    |              +-- LibreHardwareMonitorLib.dll (+ HidSharp.dll)
+    +-- stdin "\n" ticks, stdout JSON
+```
+
+The sidecar opens **every** LHM category — CPU, GPU, memory, motherboard,
+storage/NVMe, network, battery, controller and PSU — and the feed carries every
+sensor it returns through the flat `(hw, type, name, value)` payload. Two nodes
+LHM reports with the same label (two same-model GPUs, a multi-socket board's
+duplicated SuperIO) are numbered (`GPU #1`, `GPU #2`) instead of overwriting each
+other, so nothing is lost. Which of those sensors the status line *shows* is a
+separate curation step; `--dump-inventory` prints the whole set.
+
+```powershell
+target\debug\minihud.exe --dump-inventory   # every sensor the bridge reports, then exit
 ```
 
 Hardware stats refresh on the `--hardware-poll` cadence (default 500 ms). The same
@@ -89,15 +101,23 @@ by the read rather than the tick.
 
 ## One-time DLL fetch
 
-The LHM assembly is gitignored (~700 KB), pinned to 0.9.4:
+The LHM assembly is gitignored (~700 KB), pinned to 0.9.4. `HidSharp.dll` is its
+USB-HID dependency — the controller and PSU categories cannot open without it:
 
 ```powershell
 curl -L "https://www.nuget.org/api/v2/package/LibreHardwareMonitorLib/0.9.4" -o lhm.zip
 Expand-Archive lhm.zip lhm-pkg
 Copy-Item lhm-pkg\lib\net472\LibreHardwareMonitorLib.dll tools\lhm\
+
+curl -L "https://www.nuget.org/api/v2/package/HidSharp/2.1.0" -o hid.zip
+Expand-Archive hid.zip hid-pkg
+Copy-Item hid-pkg\lib\net35\HidSharp.dll tools\lhm\
 ```
 
-Without it the exe runs but every hardware value reads `--`.
+Both assemblies also ship in the `LibreHardwareMonitor-net472.zip` release. The
+bridge still serves every other category (CPU, GPU, memory, motherboard,
+storage/NVMe, network, battery) and says on stderr why it skipped those two.
+Without the LHM assembly itself the exe runs but every hardware value reads `--`.
 
 ## Build & run
 
@@ -111,16 +131,15 @@ cargo xtask clean            # clean target/ and dist/
 
 `cargo xtask build` is what stages everything next to the exe so it resolves
 assets from its own directory: `lhm-bridge.ps1`, `LibreHardwareMonitorLib.dll`,
-and `PresentMon.exe` (the tier-0 ETW FPS sidecar; staged only when
-`tools/presentmon/PresentMon.exe` is present). It also stages a default
-`minihud.toml` (all defaults active, alternatives commented) when none exists;
-an existing file is never overwritten. Plain `cargo build` compiles but
-does not stage.
+plus `HidSharp.dll` for the controller and PSU categories (each staged only when
+its `tools/lhm/` source is present — see the fetch section above). Plain
+`cargo build` compiles but does not stage.
 
 ### Hardware stats
 
 ```powershell
-target\debug\minihud.exe --stats-only   # live status line (updates in place); Ctrl+C to stop
+target\debug\minihud.exe                    # status line; Ctrl+C to stop
+target\debug\minihud.exe --dump-inventory   # every sensor the bridge reports, then exit
 ```
 
 ### FPS console mode (tier 0)
@@ -146,33 +165,58 @@ the ETW session, the fps reads `--` and the run keeps going.
 ## CLI reference
 
 ```text
-minihud                                    show the OSD overlay (default)
-minihud --stats-only                       print hardware stats only (no fps)
-minihud --gui [--match <glob>] [--follow-secs <n>]
-minihud --follow [--match <glob>] [--follow-secs <n>]
-minihud -h | --help                        print help
+minihud                              print the hardware status line (Ctrl+C to stop)
+minihud --dump-inventory             print every sensor the LHM bridge reports, then exit
+minihud --diagnostics                developer: trace-level live stream and the per-run record
+minihud -h | --help                  print help
 
-<pid|name> is a numeric pid or a process image name (case-insensitive, `.exe`
-optional): `Overwatch`, `overwatch.exe`, or `1234` all work.
-
-FPS (tier 0, ETW, never injects):
---fps / --no-fps             enable / disable the ETW fps readout (default: on).
---fps-poll <n>               fps refresh cadence in ms (default 500): how often the readout
-                             redraws and the target is re-resolved. The average is always over
-                             a fixed 500 ms window.
---fps-pid <pid|name>         explicit fps target (default: the followed/foreground target).
---follow                     follow the foreground target (or --match) and show its fps via
-                             ETW on the console. Ctrl+C to stop. Needs elevation (ETW).
---match <glob>               with --follow or --gui, target an exe by case-insensitive glob
-                             instead of the foreground process (e.g. deadlock*.exe).
---follow-secs <n>            with --follow or --gui, stop after <n> seconds (default: until Ctrl+C).
+Hardware stats:
 --hardware-poll <n>          hardware-stats poll cadence in ms (default 500). One value drives
-                             both the status-line refresh and the LHM bridge tick.
---stats                      log the achieved hw/fps updates-per-second once a second.
---stats-only                 print hardware stats only; never show fps.
+                               both the status-line refresh and the LHM bridge tick.
+--dump-inventory             development inspection: dump the complete sensor inventory (every
+                               LHM category, every sensor, grouped by hardware node) and exit.
+                               The status line itself never depends on it.
+--stats                      log the achieved hw updates-per-second once a second.
+
+Developer diagnostics:
+--diagnostics                developer-only: raise the live stream to trace (every event, every
+                               span, every timing) and show the span of each line. Without it the
+                               console stays at `info` (or `RUST_LOG`) and looks exactly as before.
+RUST_LOG                      live-stream filter; wins over `--diagnostics`. Default `info`.
 
 MINIHUD_NO_ELEVATE=1         skip the UAC self-elevation (headless tests/diagnostics).
 ```
+
+The overlay and fps modes are gone: this build is the headless hardware-stats
+backend, so an unknown flag is simply ignored rather than selecting a mode that no
+longer exists.
+
+## Diagnostics record (every run)
+
+Every run — no flag, no environment variable — writes its own record into a
+timestamped folder next to the exe, so `cargo clean` reclaims it together with
+`target/`:
+
+```text
+target\debug\diagnostics\run-DD_MM_YYYY-HH-MM-SS\diagnostics.log    verbose text log
+target\debug\diagnostics\run-DD_MM_YYYY-HH-MM-SS\diagnostics.jsonl  structured JSONL
+```
+
+`run-DD_MM_YYYY-HH-MM-SS` is UTC, and every run keeps its own folder, so prior
+runs are preserved until `cargo clean`. The JSONL carries one object per line
+with a fixed shape — `run_id`, `timestamp`, `event_kind`, `subsystem`, `level`,
+`span_name`, `duration_us`, `sensor_values`, `render_stats`, `payload`,
+`message` — where `event_kind` is one of `subsystem`, `sensor_poll`,
+`bridge_lifecycle`, `retry`, `timing`, `render_stat`. Nothing is omitted: each
+poll's complete sensor dump, each poll cycle's span and duration, the bridge's
+lifecycle and retries, and the rendered stats line with every value behind it.
+`process.start` (version, argv, exe, cwd, pid, elevation) opens the file and
+`process.stop` (reason, uptime) closes it.
+
+The record is written on every run, so it is silent about the console: a run
+without `--diagnostics` prints exactly what it always printed. Diagnostics never
+reach the end user; if a write fails, the run degrades and reports once.
+
 
 ## OSD overlay (default)
 

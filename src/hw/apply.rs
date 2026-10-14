@@ -3,6 +3,7 @@
 //! Split out of the feed module so the parsing/mapping logic is a small,
 //! unit-tested unit separate from the PowerShell sidecar I/O.
 
+use super::inventory::node_label;
 use super::lhm::LhmSensor;
 use super::HwStats;
 
@@ -42,7 +43,7 @@ pub fn apply(sensors: &[LhmSensor], stats: &mut HwStats) {
 fn apply_cpu(sensors: &[LhmSensor], stats: &mut HwStats) {
     let cpu = |ty: &str, names: &[&str]| pick(sensors, |hw| hw.starts_with("Cpu:"), ty, names);
     if let Some(v) = cpu("Load", &["CPU Total"]) {
-        stats.cpu_percent = v.clamp(0.0, PERCENT_MAX) as f32;
+        stats.cpu_percent = Some(v.clamp(0.0, PERCENT_MAX) as f32);
     }
     if let Some(v) = cpu(
         "Temperature",
@@ -72,9 +73,15 @@ fn apply_ram(sensors: &[LhmSensor], stats: &mut HwStats) {
     }
 }
 
-/// CPU / GPU names from the first matching hardware block.
+/// CPU / GPU names from the first matching hardware block, with any collision
+/// suffix stripped (the suffix is flat-payload bookkeeping, not part of the
+/// device name a user reads on the status line).
 fn apply_names(sensors: &[LhmSensor], stats: &mut HwStats) {
-    let name_of = |s: &LhmSensor| s.hw.split_once(':').map(|(_, n)| n.trim().to_string());
+    let name_of = |s: &LhmSensor| {
+        node_label(&s.hw)
+            .split_once(':')
+            .map(|(_, n)| n.trim().to_string())
+    };
     if let Some(s) = sensors.iter().find(|s| s.hw.starts_with("Cpu:")) {
         stats.cpu_name = name_of(s);
     }
@@ -84,12 +91,14 @@ fn apply_names(sensors: &[LhmSensor], stats: &mut HwStats) {
 }
 
 /// GPU sensors from the first discrete GPU block (single-dGPU assumption,
-/// documented). Everything is scoped to that exact hardware string.
+/// documented). Everything is scoped to that hardware node: the label is the
+/// node's base label, and every row of the node matches it — with or without
+/// its collision suffix — so a numbered node still maps as one block.
 fn apply_gpu(sensors: &[LhmSensor], stats: &mut HwStats) {
     let Some(hw) = sensors
         .iter()
         .find(|s| s.hw.starts_with("Gpu"))
-        .map(|s| s.hw.clone())
+        .map(|s| node_label(&s.hw).to_string())
     else {
         return;
     };
@@ -100,7 +109,7 @@ fn apply_gpu(sensors: &[LhmSensor], stats: &mut HwStats) {
 
 /// GPU temperature, load and power.
 fn apply_gpu_thermal(sensors: &[LhmSensor], hw: &str, stats: &mut HwStats) {
-    let g = |ty: &str, names: &[&str]| pick(sensors, |h| h == hw, ty, names);
+    let g = |ty: &str, names: &[&str]| pick(sensors, |h| node_label(h) == hw, ty, names);
     if let Some(v) = g("Temperature", &["GPU Core"]) {
         stats.gpu_temp_c = Some(v as f32);
     }
@@ -114,7 +123,7 @@ fn apply_gpu_thermal(sensors: &[LhmSensor], hw: &str, stats: &mut HwStats) {
 
 /// GPU core / memory clocks and core voltage.
 fn apply_gpu_clocks(sensors: &[LhmSensor], hw: &str, stats: &mut HwStats) {
-    let g = |ty: &str, names: &[&str]| pick(sensors, |h| h == hw, ty, names);
+    let g = |ty: &str, names: &[&str]| pick(sensors, |h| node_label(h) == hw, ty, names);
     if let Some(v) = g("Clock", &["GPU Core"]) {
         stats.gpu_core_mhz = Some(v as u32);
     }
@@ -128,7 +137,7 @@ fn apply_gpu_clocks(sensors: &[LhmSensor], hw: &str, stats: &mut HwStats) {
 
 /// GPU memory: D3D-dedicated, used, and VRAM used/total.
 fn apply_gpu_memory(sensors: &[LhmSensor], hw: &str, stats: &mut HwStats) {
-    let g = |ty: &str, names: &[&str]| pick(sensors, |h| h == hw, ty, names);
+    let g = |ty: &str, names: &[&str]| pick(sensors, |h| node_label(h) == hw, ty, names);
     if let Some(v) = g("SmallData", &["D3D Dedicated Memory Used"]) {
         stats.gpu_d3d_dedicated_mb = Some(v as u64);
     }
@@ -168,7 +177,7 @@ mod tests {
         ];
         let mut st = HwStats::default();
         apply(&sensors, &mut st);
-        assert_eq!(st.cpu_percent, 42.0);
+        assert_eq!(st.cpu_percent, Some(42.0));
         assert_eq!(st.cpu_temp_c, Some(61.5));
         assert_eq!(st.cpu_power_w, Some(88.0));
         assert_eq!(st.cpu_clock_mhz, Some(4200));
@@ -183,7 +192,7 @@ mod tests {
         ];
         let mut st = HwStats::default();
         apply(&sensors, &mut st);
-        assert_eq!(st.cpu_percent, 100.0);
+        assert_eq!(st.cpu_percent, Some(100.0));
         assert_eq!(st.gpu_percent, Some(0.0));
     }
 
@@ -238,6 +247,23 @@ mod tests {
     }
 
     #[test]
+    fn apply_names_strip_a_collision_suffix_from_the_display_name() {
+        // Catches: two same-model GPUs putting bridge bookkeeping into the
+        // rendered status line — "[NVIDIA GeForce RTX 3070 #1]" — where the
+        // suffix is an artifact of the flat payload, not part of the device
+        // name. Needs no GPU fixture beyond the first row.
+        let sensors = vec![s(
+            "GpuNvidia:NVIDIA GeForce RTX 3070 #1",
+            "Temperature",
+            "GPU Core",
+            55.0,
+        )];
+        let mut st = HwStats::default();
+        apply(&sensors, &mut st);
+        assert_eq!(st.gpu_name.as_deref(), Some("NVIDIA GeForce RTX 3070"));
+    }
+
+    #[test]
     fn apply_leaves_missing_fields_untouched() {
         let mut st = HwStats {
             cpu_temp_c: Some(50.0),
@@ -249,9 +275,57 @@ mod tests {
             Some(50.0),
             "no sensor must not clear a field"
         );
-        assert_eq!(st.cpu_percent, 0.0);
+        assert_eq!(
+            st.cpu_percent, None,
+            "an unseen cpu load is not a guessed 0"
+        );
         assert_eq!(st.gpu_temp_c, None);
         assert_eq!(st.cpu_name, None);
+    }
+
+    #[test]
+    fn a_colliding_gpu_node_still_maps_every_curated_field() {
+        // Catches: LHM reporting several sensors with one name (the D3D engine
+        // counters) so the GPU node's first row arrives suffixed (`… #1`), which
+        // would narrow the curated lookup to that single row and blank every
+        // GPU field on a real machine.
+        let sensors = vec![
+            s("GpuNvidia:RTX 3070 #1", "Load", "D3D Copy", 0.0),
+            s("GpuNvidia:RTX 3070", "Temperature", "GPU Core", 55.0),
+            s("GpuNvidia:RTX 3070", "Load", "GPU Core", 80.0),
+            s("GpuNvidia:RTX 3070", "Power", "GPU Package", 200.0),
+            s("GpuNvidia:RTX 3070", "Clock", "GPU Core", 1900.0),
+            s("GpuNvidia:RTX 3070", "Clock", "GPU Memory", 7000.0),
+            s("GpuNvidia:RTX 3070", "Voltage", "GPU Core", 1050.0),
+            s("GpuNvidia:RTX 3070", "SmallData", "GPU Memory Used", 3000.0),
+            s(
+                "GpuNvidia:RTX 3070",
+                "SmallData",
+                "GPU Memory Total",
+                8192.0,
+            ),
+            s(
+                "GpuNvidia:RTX 3070",
+                "SmallData",
+                "D3D Dedicated Memory Used",
+                4096.0,
+            ),
+        ];
+        let mut st = HwStats::default();
+        apply(&sensors, &mut st);
+        assert_eq!(st.gpu_temp_c, Some(55.0));
+        assert_eq!(st.gpu_percent, Some(80.0));
+        assert_eq!(st.gpu_power_w, Some(200.0));
+        assert_eq!(st.gpu_core_mhz, Some(1900));
+        assert_eq!(st.gpu_mem_mhz, Some(7000));
+        assert_eq!(st.gpu_voltage_mv, Some(1050));
+        assert_eq!(st.gpu_vram_used_mb, Some(3000));
+        assert_eq!(st.gpu_vram_total_mb, Some(8192));
+        assert_eq!(
+            st.gpu_name.as_deref(),
+            Some("RTX 3070"),
+            "the name must not carry the collision suffix"
+        );
     }
 
     #[test]

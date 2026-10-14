@@ -4,6 +4,8 @@
 
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
+
 use super::apply::apply;
 use super::lhm::{LhmFeed, LhmSensor};
 
@@ -19,9 +21,9 @@ const SAMPLE_MAX_AGE_SECS: u64 = 3;
 /// Consecutive quiet polls before the interval backs off toward idle.
 const STABLE_POLLS: u8 = 4;
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, Serialize)]
 pub struct HwStats {
-    pub cpu_percent: f32,
+    pub cpu_percent: Option<f32>,
     pub cpu_temp_c: Option<f32>,
     pub cpu_power_w: Option<f32>,
     pub cpu_clock_mhz: Option<u32>,
@@ -66,6 +68,9 @@ pub struct HwPoller {
     feed: Box<dyn SensorFeed>,
     cached: HwStats,
     prev: Option<HwStats>,
+    /// The raw rows of the latest poll, kept whole so the diagnostics record
+    /// can persist the complete sensor dump (nothing dropped, nothing curated).
+    last_rows: Vec<LhmSensor>,
 }
 
 impl HwPoller {
@@ -85,6 +90,7 @@ impl HwPoller {
             feed,
             cached: HwStats::default(),
             prev: None,
+            last_rows: Vec::new(),
         }
     }
 
@@ -96,6 +102,7 @@ impl HwPoller {
         self.last = Instant::now();
         if let Some(sensors) = self.feed.latest(Duration::from_secs(SAMPLE_MAX_AGE_SECS)) {
             apply(&sensors, &mut self.cached);
+            self.last_rows = sensors;
         }
         if changed(self.prev.as_ref(), &self.cached) {
             self.next = self.active;
@@ -113,6 +120,12 @@ impl HwPoller {
 
     pub fn cached(&self) -> &HwStats {
         &self.cached
+    }
+
+    /// The raw rows of the most recent poll: the complete sensor dump, before
+    /// any curation onto [`HwStats`]. Empty until the first sample lands.
+    pub fn last_dump(&self) -> &[LhmSensor] {
+        &self.last_rows
     }
 
     /// How long until the next poll is due (`Duration::ZERO` when already due).
@@ -142,7 +155,7 @@ pub(crate) fn changed(prev: Option<&HwStats>, cur: &HwStats) -> bool {
 
 /// Continuous fields compared with an epsilon (they always jitter).
 fn scalar_changed(p: &HwStats, c: &HwStats) -> bool {
-    (c.cpu_percent - p.cpu_percent).abs() > LOAD_EPS_PCT
+    opt_changed(c.cpu_percent, p.cpu_percent, LOAD_EPS_PCT)
         || opt_u64_changed(c.ram_used_mb, p.ram_used_mb, MEM_EPS_MB)
         || opt_changed(c.gpu_percent, p.gpu_percent, LOAD_EPS_PCT)
         || opt_changed(c.gpu_temp_c, p.gpu_temp_c, TEMP_EPS_C)
@@ -241,12 +254,12 @@ mod tests {
     #[test]
     fn changed_ignores_fluctuations_within_noise() {
         let a = HwStats {
-            cpu_percent: 10.0,
+            cpu_percent: Some(10.0),
             gpu_temp_c: Some(50.0),
             ..Default::default()
         };
         let b = HwStats {
-            cpu_percent: 11.5,
+            cpu_percent: Some(11.5),
             gpu_temp_c: Some(50.3),
             ..Default::default()
         };
@@ -256,11 +269,11 @@ mod tests {
     #[test]
     fn changed_flags_real_moves() {
         let a = HwStats {
-            cpu_percent: 10.0,
+            cpu_percent: Some(10.0),
             ..Default::default()
         };
         let b = HwStats {
-            cpu_percent: 13.0,
+            cpu_percent: Some(13.0),
             ..Default::default()
         };
         assert!(changed(Some(&a), &b), "cpu load moved past 2%");
@@ -291,7 +304,7 @@ mod tests {
         let feed = FixedFeed(vec![sensor("Load", "CPU Total", 42.0)]);
         let mut p = HwPoller::with_feed(200, Box::new(feed));
         assert!(p.update().is_some(), "first poll is due");
-        assert_eq!(p.cached().cpu_percent, 42.0);
+        assert_eq!(p.cached().cpu_percent, Some(42.0));
         assert!(p.update().is_none(), "an immediate second poll is not due");
     }
 
@@ -302,7 +315,7 @@ mod tests {
             p.update().is_some(),
             "a due poll returns even with no sample"
         );
-        assert_eq!(p.cached().cpu_percent, 0.0);
+        assert_eq!(p.cached().cpu_percent, None);
     }
 
     #[test]

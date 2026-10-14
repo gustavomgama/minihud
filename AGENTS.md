@@ -1,5 +1,44 @@
 # minihud — project rules
 
+## MCPs, skills and plugins
+
+**Pre-flight gate — before any action, with no exceptions.** On every request —
+a task, a question, research, debugging, even a one-line answer — and before
+any tool call: scan your available MCPs, skills, and plugins, then load or
+consult every one whose domain matches the request or its likely next steps.
+"Nothing matched" is a claim that requires having checked, not a guess. Never
+answer from memory when a matching source could verify it.
+
+### MCPs
+
+| MCP | Use it for | When it is required |
+|---|---|---|
+| `context7` | Library and API docs | Any external-library or version-sensitive API question (pinned stack in the section below) |
+| `rust-analyzer` | Real diagnostics, hover, go-to-definition, references in this workspace | Before using any Rust or `windows`-crate API — never invent one from memory |
+| `gitmcp` | Upstream docs for `gustavomgama/minihud` | When the answer should come from minihud's own docs — check before a web search |
+| `github` | Issues, PRs, releases, code search | Any work that touches GitHub |
+| `rea` | Reverse-engineering native and managed binaries | PresentMon, Windows API internals, or other local artifacts |
+| `egui-mcp` | Driving a live egui UI: observe → act → verify | Any UI change — verify the rendered result before claiming it works |
+
+Configured MCPs not listed here (Postman, Neon, Render, Rails) are unrelated to
+this project — leave them alone.
+
+### Skills
+
+| Skill | Load it when |
+|---|---|
+| `test-driven-development` | Before any production code — mandatory, see the TDD section below |
+| `rust` | Any Rust task; runs the fmt/clippy/nextest gate |
+| `jev` | Before writing or revising Jev questions — never invent a rubric from scratch |
+
+Load the skill with the `skill` tool before writing code in its domain, not
+after you are stuck.
+
+### Plugins
+
+Plugins load automatically from the opencode config — no action needed. When a
+plugin's domain matches the task, prefer it over hand-rolling the equivalent.
+
 ## Context7 (library docs)
 
 Always use Context7 (`resolve-library-id` + `query-docs`) for any library/API
@@ -17,7 +56,6 @@ Context7 IDs where they exist:
 
 Pass `language: "Rust"` on every `query-docs` call, and mention the exact
 version from `Cargo.toml` in the query so version-specific docs come back.
-
 
 ## TDD is mandatory (all agents, every session)
 

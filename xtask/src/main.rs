@@ -20,9 +20,16 @@ pub(crate) const EXE: &str = "minihud.exe";
 
 /// Assets copied next to the built exe and into `dist/`.
 /// `(path relative to workspace root, required)`.
+///
+/// The two `.dll` files are gitignored and fetched separately (see README): the
+/// LHM assembly is the sensor source, and `HidSharp.dll` is its USB-HID
+/// dependency for the controller and PSU categories. A local tree with neither
+/// builds fine and reads `--`; a copy with the DLL but without HidSharp serves
+/// every category except controller and PSU.
 pub(crate) const ASSETS: &[(&str, bool)] = &[
     ("tools/lhm/lhm-bridge.ps1", true),
     ("tools/lhm/LibreHardwareMonitorLib.dll", false),
+    ("tools/lhm/HidSharp.dll", false),
 ];
 
 /// Win32 error codes we treat as "locked" (a running exe holds the file).

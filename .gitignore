@@ -8,3 +8,12 @@ lcov.info
 /report/
 .opencode/opencode-loop/
 /nul
+
+# Tool/session state (agent tooling, not project files)
+.pmcp/
+.redcon/
+.serena/
+.ouroboros/
+.ouroboros_eval_artifact.md
+dump.txt
+seedcheck.tmp

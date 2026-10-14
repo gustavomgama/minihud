@@ -4,6 +4,33 @@
 
 ### Features
 
+- **Diagnostics record (every run).** Every run writes its own pair of
+  artifacts into `target\<profile>\diagnostics\run-DD_MM_YYYY-HH-MM-SS\` next to
+  the exe — a verbose text log and a structured JSONL — so `cargo clean`
+  reclaims them. One timestamped folder per run, so prior runs are preserved.
+  Nothing is omitted: each poll's complete sensor dump, every poll cycle's span
+  and duration, the bridge's lifecycle and retries, and each rendered stats
+  line with every value behind it, at trace depth in both the live stream and
+  the files. `process.start` / `process.stop` bracket the run.
+- **`--diagnostics`.** Developer-only live trace surface: the console stream
+  moves to `trace`, every event's span is shown, and span timings print live.
+  Without the flag the console is byte-for-byte what it always was (`info`, or
+  `RUST_LOG`), because the record persists silently and the console formatter
+  hides span scope.
+- **Complete LHM sensor inventory.** The bridge now opens every LibreHardwareMonitor
+  category — CPU, GPU, memory, motherboard, storage/NVMe, network, battery,
+  controller and PSU — and the feed carries every sensor through the flat
+  `(hw, type, name, value)` payload. Nodes that share a label (two same-model
+  GPUs, a multi-socket board's duplicated SuperIO) are numbered (`GPU #1`,
+  `GPU #2`) instead of overwriting each other.
+- **`--dump-inventory`.** Prints every sensor the bridge reports, grouped by
+  hardware node, then exits: a development-inspection surface, so the full data
+  set can be reviewed without waiting for the curated status line. The shipped
+  console output is unchanged.
+- **HidSharp staging.** `tools/lhm/HidSharp.dll` is the USB-HID dependency the
+  controller and PSU categories need; it is staged with the other bridge assets
+  and documented in the one-time fetch. Without it the bridge still serves every
+  other category instead of failing to open at all.
 - **OSD overlay (`--gui`).** A transparent, always-on-top, click-through OSD
   showing FPS plus CPU / GPU / RAM, drawn with `egui`/`eframe`. It opens on a
   bare run; `--follow` and `--stats-only` select the headless console modes.
@@ -48,6 +75,11 @@
 
 ### Fixes
 
+- The poll loop no longer busy-spins. `wait_for_due` reads the run flag as
+  "running", so the wait used to return at once and the loop spun at full
+  tilt while the cadence was already enforced downstream: a core burned on
+  every run. The flag's contract is now covered by
+  `the_wait_treats_the_run_flag_as_running`.
 - Settled (fully faded) overlay no longer repaints at 20 fps.
 - The followed-process name on the overlay is the file name, never a full
   install path (a long path stretched the panel and painted over the hero).

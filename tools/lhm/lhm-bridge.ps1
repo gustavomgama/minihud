@@ -1,19 +1,26 @@
 #Requires -Version 5.0
 <#
-  lhm-bridge.ps1 — LibreHardwareMonitor sidecar for minihud.
+   lhm-bridge.ps1 — LibreHardwareMonitor sidecar for minihud.
 
-  Loads LibreHardwareMonitorLib.dll (net472, no SDK needed), opens the
-  hardware monitor, warms sensors up, then serves one JSON sensor dump
-  per blank line on stdin:
+   Loads LibreHardwareMonitorLib.dll (net472, no SDK needed), opens EVERY LHM
+   hardware category, warms sensors up, then serves one JSON sensor dump per
+   blank line on stdin:
 
-      > \n
-      < [{"hw":"Cpu:...","type":"Temperature","name":"...","value":42.0}, ...]
+       > \n
+       < [{"hw":"Cpu:...","type":"Temperature","name":"...","value":42.0}, ...]
 
-  Non-finite values (NaN from cold sensors) are filtered: System.Text.Json
-  refuses them and Rust would choke. A closed stdin ends the loop cleanly.
+   Non-finite values (NaN from cold sensors) are filtered: System.Text.Json
+   refuses them and Rust would choke. A closed stdin ends the loop cleanly.
 
-  Usage:
-      powershell -NoProfile -ExecutionPolicy Bypass -File lhm-bridge.ps1 -DllPath .\LibreHardwareMonitorLib.dll
+   The rows stay flat — (hw, type, name, value) — because the payload carries no
+   node identity; the host numbers the sensors that collide (two same-model
+   GPUs) so no sensor is overwritten.
+
+   Stdout is the protocol: the version banner, `READY`, then one JSON line per
+   tick. Anything the operator should see goes to stderr.
+
+   Usage:
+       powershell -NoProfile -ExecutionPolicy Bypass -File lhm-bridge.ps1 -DllPath .\LibreHardwareMonitorLib.dll
 #>
 param(
     [Parameter(Mandatory = $true)]
@@ -31,12 +38,48 @@ Write-Output "lhm-bridge dll v$ver"
 
 Add-Type -Path $DllPath
 
-$computer = New-Object LibreHardwareMonitor.Hardware.Computer
-$computer.IsCpuEnabled = $true
-$computer.IsGpuEnabled = $true
-$computer.IsMemoryEnabled = $true
-$computer.IsMotherboardEnabled = $true
-$computer.Open()
+# Every LHM hardware category the assembly exposes, so the flat payload carries
+# the complete inventory: storage/NVMe, network, battery, controllers and PSU
+# beside CPU, GPU, memory and motherboard. Nothing is curated out here.
+$categories = @(
+    'IsBatteryEnabled'
+    'IsControllerEnabled'
+    'IsCpuEnabled'
+    'IsGpuEnabled'
+    'IsMemoryEnabled'
+    'IsMotherboardEnabled'
+    'IsNetworkEnabled'
+    'IsPsuEnabled'
+    'IsStorageEnabled'
+)
+
+# Fan controllers and power monitors are read over USB HID, which LHM does
+# through HidSharp — an optional assembly that ships beside the LHM DLL.
+# Opening those two categories without it makes LHM's Open() throw half-way
+# through the enumeration, which would serve no sensor at all, so they are
+# dropped on the retry instead.
+$hidCategories = @('IsControllerEnabled', 'IsPsuEnabled')
+
+function New-Monitor($withHidCategories) {
+    $computer = New-Object LibreHardwareMonitor.Hardware.Computer
+    foreach ($name in $categories) {
+        if ($withHidCategories -or $hidCategories -notcontains $name) {
+            $computer.$name = $true
+        }
+    }
+    $computer.Open()
+    return $computer
+}
+
+try {
+    $computer = New-Monitor $true
+} catch {
+    # A second, fresh Computer object: the failed Open() already enumerated the
+    # non-HID groups, so reusing it would report every node twice.
+    [Console]::Error.WriteLine("lhm-bridge: $($_.Exception.Message)")
+    [Console]::Error.WriteLine('lhm-bridge: controller and PSU categories closed (HidSharp.dll missing or unusable beside the LHM DLL; see README)')
+    $computer = New-Monitor $false
+}
 
 # Cold sensors read 0/NaN on the first cycles; warm up before serving.
 for ($i = 0; $i -lt 3; $i++) {

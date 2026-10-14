@@ -12,13 +12,14 @@
 //!
 //! Mapping a sample onto [`super::HwStats`] lives in [`super::apply`].
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use super::inventory::disambiguate;
 use crate::retry;
 
 /// Fixed backoff before retrying a failed bridge session.
@@ -28,8 +29,9 @@ const MAX_JITTER: Duration = Duration::from_millis(retry::MAX_JITTER_MS);
 /// How long the backoff sleeps before re-checking the stop flag.
 const BACKOFF_POLL_MS: u64 = 100;
 
-/// One sensor reading from the bridge.
-#[derive(Clone, Debug, Deserialize)]
+/// One sensor reading from the bridge. `Serialize` lets a complete poll dump
+/// be embedded in a diagnostics record as structured JSON.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LhmSensor {
     /// e.g. "GpuNvidia:NVIDIA GeForce RTX 3070".
     pub hw: String,
@@ -82,7 +84,10 @@ impl LhmFeed {
     }
 
     /// Run sessions until stopped, backing off (with jitter) between failures.
+    /// The supervisor span covers the feed's whole lifetime, so the record
+    /// shows how long the bridge was being watched and what it retried.
     fn run(slot: LhmLatest, control: Arc<Mutex<Control>>, poll_ms: u64) {
+        let _supervisor = tracing::info_span!("bridge_supervisor", poll_ms = poll_ms).entered();
         let mut failures: u64 = 0;
         let mut jitter = retry::Jitter::new(retry::seed_now(std::process::id()));
         while !is_stopped(&control) {
@@ -109,6 +114,7 @@ impl LhmFeed {
         control: &Arc<Mutex<Control>>,
         poll_ms: u64,
     ) -> Result<(), String> {
+        let _session = tracing::info_span!("bridge_session", poll_ms = poll_ms).entered();
         let (mut out, mut stdin, child) = start_bridge()?;
         if !install_child(control, child)? {
             return Ok(()); // raced with Drop
@@ -284,7 +290,8 @@ fn tick(
 /// Parse one JSON sensor dump and publish it; a bad line is logged, not fatal.
 fn store_sample(line: &str, slot: &LhmLatest) {
     match serde_json::from_str::<Vec<LhmSensor>>(line) {
-        Ok(sensors) => {
+        Ok(rows) => {
+            let sensors = disambiguate(&rows);
             tracing::trace!("lhm sensors: count={}", sensors.len());
             if let Ok(mut g) = slot.lock() {
                 *g = Some((Instant::now(), sensors));
@@ -313,6 +320,7 @@ fn paths() -> Option<(PathBuf, PathBuf)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn empty_slot() -> LhmLatest {
         Arc::new(Mutex::new(None))
@@ -344,6 +352,11 @@ mod tests {
     }
 
     const ONE_SENSOR: &str = r#"[{"hw":"Cpu:X","type":"Load","name":"CPU Total","value":42.0}]"#;
+
+    /// How long the real-sidecar probe waits for its first handshake + dump
+    /// before calling it wedged: the sidecar loads the assembly and warms its
+    /// sensors, which is a couple of seconds even on a fast machine.
+    const BRIDGE_PROBE_SECS: u64 = 90;
 
     #[test]
     fn read_handshake_requires_a_ready_second_line() {
@@ -416,6 +429,163 @@ mod tests {
         assert_eq!(bridge_delay(0), Duration::from_millis(1));
         assert_eq!(bridge_delay(100), Duration::from_millis(100));
         assert_eq!(bridge_delay(500), Duration::from_millis(500));
+    }
+
+    /// The bridge script, resolved from the crate root (it ships in the repo,
+    /// not next to the test binary).
+    fn bridge_script() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/lhm/lhm-bridge.ps1")
+    }
+
+    /// The LHM assembly. It is gitignored (see README), so a clone without it
+    /// skips the tests that need a real LHM instead of failing.
+    fn lhm_dll() -> Option<PathBuf> {
+        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/lhm/LibreHardwareMonitorLib.dll");
+        p.exists().then_some(p)
+    }
+
+    /// Ask the assembly which hardware categories LibreHardwareMonitor exposes:
+    /// the boolean `Is*Enabled` properties of the real `Computer` class, so the
+    /// expected list comes from LHM itself rather than from this test.
+    fn dll_categories(dll: &Path) -> std::collections::BTreeSet<String> {
+        const REFLECT: &str = "Add-Type -Path $env:MINIHUD_TEST_DLL; \
+             [LibreHardwareMonitor.Hardware.Computer].GetProperties() \
+             | Where-Object { $_.PropertyType -eq [bool] -and $_.Name -like 'Is*Enabled' } \
+             | ForEach-Object { $_.Name }";
+        let out = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", REFLECT])
+            .env("MINIHUD_TEST_DLL", dll)
+            .output()
+            .expect("run the reflection");
+        assert!(out.status.success(), "reflection failed");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The categories the bridge script asks LHM for: the `$categories` list in
+    /// its header, which is the one place the request is declared.
+    fn script_categories() -> std::collections::BTreeSet<String> {
+        let text = std::fs::read_to_string(bridge_script()).expect("read the bridge script");
+        let (_, list) = text
+            .split_once("$categories = @(")
+            .expect("the script must declare its categories");
+        let (list, _) = list
+            .split_once(')')
+            .expect("the category list must be closed");
+        list.lines()
+            .map(str::trim)
+            .filter_map(|l| l.strip_prefix('\''))
+            .filter_map(|l| l.strip_suffix('\''))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn the_bridge_opens_every_category_lhm_exposes() {
+        // Catches: a hardware category the bridge never asks LHM for — its
+        // sensors are then invisible to the whole app, and nothing reports it
+        // (the rows are simply missing). Covers storage/NVMe, network,
+        // battery, controllers and PSU beside CPU/GPU/memory/motherboard.
+        let Some(dll) = lhm_dll() else {
+            return; // no assembly in this clone: nothing to compare against
+        };
+        let from_dll = dll_categories(&dll);
+        assert!(
+            from_dll.len() >= 9,
+            "LHM should expose at least CPU/GPU/memory/motherboard/storage/network/battery/controller/PSU: {from_dll:?}"
+        );
+        assert_eq!(
+            script_categories(),
+            from_dll,
+            "the bridge must open every category LHM offers (see tools/lhm/lhm-bridge.ps1)"
+        );
+    }
+
+    #[test]
+    fn the_bridge_serves_a_parseable_inventory_with_unique_rows() {
+        // Catches: a bridge script that cannot start (a bad flag, a missing
+        // assembly) or a dump whose rows collide after numbering — i.e. a
+        // sensor still silently overwriting another. Exercises the real sidecar
+        // end to end: handshake, one tick, parse, publish.
+        let Some(dll) = lhm_dll() else {
+            return; // no assembly in this clone: the sidecar cannot load
+        };
+        let mut child = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                &bridge_script().to_string_lossy(),
+                "-DllPath",
+                &dll.to_string_lossy(),
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the bridge");
+
+        // One protocol run on its own thread, so a sidecar that never answers
+        // cannot wedge the suite: the bounded wait below gives up, and killing
+        // the child closes its stdout and unblocks the reader with an EOF.
+        let mut stdin = child.stdin.take().expect("stdin");
+        let stdout = child.stdout.take().expect("stdout");
+        let slot = empty_slot();
+        let pumped = slot.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let run = || -> Result<usize, String> {
+                let mut out = BufReader::new(stdout);
+                read_handshake(&mut out)?;
+                let mut line = String::new();
+                tick(&mut out, &mut stdin, &mut line, &pumped)
+            };
+            let _ = tx.send(run());
+        });
+
+        let probe = BRIDGE_PROBE_SECS;
+        let n = match rx.recv_timeout(Duration::from_secs(probe)) {
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the bridge protocol failed: {e}");
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the bridge did not answer within {probe}s");
+            }
+        };
+        assert!(n > 0, "the bridge must answer a tick with a dump line");
+
+        let (_, sensors) = slot.lock().expect("slot").clone().expect("a stored sample");
+        assert!(!sensors.is_empty(), "the bridge must report sensors");
+        assert!(
+            sensors.iter().all(|s| s.value.is_finite()),
+            "every row must carry a finite reading"
+        );
+        let mut triples: Vec<(String, String, String)> = sensors
+            .iter()
+            .map(|s| (s.hw.clone(), s.sensor_type.clone(), s.name.clone()))
+            .collect();
+        let rows = triples.len();
+        triples.sort();
+        triples.dedup();
+        assert_eq!(
+            triples.len(),
+            rows,
+            "no two rows may share (hw, type, name): a sensor is being overwritten"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+        reader.join().expect("the protocol reader thread");
     }
 
     #[test]

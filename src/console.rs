@@ -213,11 +213,11 @@ pub struct CompactTime;
 
 impl tracing_subscriber::fmt::time::FormatTime for CompactTime {
     fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        write!(w, "{}", hms(secs))
+        // The LOCAL clock, like every persisted timestamp: a UTC console line
+        // would read hours off the developer's wall clock on a UTC-3 machine.
+        let secs = crate::diag::time::now_parts().0;
+        let _ = write!(w, "{}", hms(secs));
+        Ok(())
     }
 }
 

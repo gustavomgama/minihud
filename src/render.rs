@@ -8,8 +8,8 @@ use crate::hw::HwStats;
 /// One hardware sample, formatted as a single text line.
 pub fn line(s: &HwStats) -> String {
     format!(
-        "CPU {:.0}% {} {} {} | RAM {} | GPU {} {} {} {}x{}MHz | {}{}",
-        s.cpu_percent,
+        "CPU {} {} {} {} | RAM {} | GPU {} {} {} {}x{}MHz | {}{}",
+        f32u(s.cpu_percent, "%"),
         f32u(s.cpu_temp_c, "C"),
         f32u(s.cpu_power_w, "W"),
         u32u(s.cpu_clock_mhz, "MHz"),
@@ -60,6 +60,17 @@ fn names(s: &HwStats) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Catches: `cpu_percent` defaulting to `0.0` (not `Option`), so the
+    /// pre-first-sample line read "CPU 0%" while every other field read
+    /// "--" — a guessed load is exactly what the `--` rule forbids.
+    #[test]
+    fn an_unobserved_cpu_load_renders_as_a_dash() {
+        assert_eq!(
+            line(&HwStats::default()),
+            "CPU -- -- -- -- | RAM -- | GPU -- -- -- --x--MHz | VRAM --"
+        );
+    }
 
     #[test]
     fn formats_optional_numbers() {
